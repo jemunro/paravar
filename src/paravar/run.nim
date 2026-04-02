@@ -196,8 +196,8 @@ proc waitOneGather(running: var seq[InFlightGather]; failed: var bool) =
   while j < running.len:
     if running[j].pid == donePid:
       discard ^running[j].writeFv
-      discard ^running[j].interceptFv
-      if code != 0:
+      let interceptCode = ^running[j].interceptFv
+      if code != 0 or interceptCode != 0:
         stderr.writeLine &"shard {running[j].shardIdx + 1}: pipeline exited with code {code}"
         failed = true
       running.del(j)

@@ -12,28 +12,14 @@ The canonical reference for scatter behaviour is `example/scatter_vcf.py`.
 
 ---
 
-## ⚠️ REVERT REQUIRED — read before touching any code
-
-A partial CLI refactor (Step C1) was started but is now superseded by a new design. The previous attempt was removing subcommand dispatch from `main.nim` in favour of a unified no-subcommand interface. That direction is abandoned.
-
-**Before implementing anything:**
-
-1. Read `src/paravar/main.nim` in full
-2. Identify and remove any changes that eliminated or bypassed subcommand dispatch (`scatter`, `run`, `gather`)
-3. Restore explicit subcommand dispatch if it was removed or weakened
-4. Run `nimble test` — all existing tests must pass before proceeding
-5. Only then begin Step C1 from this document
-
----
-
 ## Subcommands
 
 | Subcommand | Status | Description |
 |---|---|---|
-| `scatter` | ✅ → refactor | Split VCF/BCF into N shards |
-| `run` | ✅ → refactor | Scatter + parallel tool pipelines → per-shard outputs |
-| `run --gather` | ✅ → refactor | As above, gathered into single output file |
-| `gather` | 🔲 New | Concatenate existing shard files into single output |
+| `scatter` | ✅ | Split VCF/BCF into N shards |
+| `run` | ✅ | Scatter + parallel tool pipelines → per-shard outputs |
+| `run --gather` | ✅ | As above, gathered into single output file |
+| `gather` | ✅ | Concatenate existing shard files into single output |
 
 ---
 
@@ -58,18 +44,18 @@ Scatter + pipe each shard through a tool pipeline. Without `--gather`, writes N 
 ### `run --gather`
 
 ```
-paravar run --gather -n <n> -o <o> [options] <input> (--- | :::) <cmd> [(--- | :::) <cmd> ...]
+paravar run --gather [-o <o>] -n <n> [options] <input> (--- | :::) <cmd> [(--- | :::) <cmd> ...]
 ```
 
-As `run`, but intercept each shard's stdout, strip headers from shards 2..N, and concatenate into the single `-o` output file.
+As `run`, but intercept each shard's stdout, strip headers from shards 2..N, and concatenate into `-o`. If `-o` is omitted or set to `/dev/stdout`, output is written to stdout.
 
 ### `gather`
 
 ```
-paravar gather -o <o> [options] <shard1> [<shard2> ...]
+paravar gather [-o <o>] [options] <shard1> [<shard2> ...]
 ```
 
-Concatenate pre-existing shard files (output of `scatter` or `run`) into a single output file. Same header stripping and recompression logic as `run --gather`. No `--tmp-dir` needed — operates directly on input files.
+Concatenate pre-existing shard files (output of `scatter` or `run`) into a single output file. Same header stripping and recompression logic as `run --gather`. No `--tmp-dir` needed — operates directly on input files. If `-o` is omitted or set to `/dev/stdout`, output is written to stdout.
 
 ---
 
@@ -143,7 +129,7 @@ If the input is VCF (`.vcf.gz`) and `-o` ends with `.bcf` (or vice versa), print
 
 | Flag | Long form | Description |
 |---|---|---|
-| `-o` | `--output` | Output path or suffix (required) |
+| `-o` | `--output` | Output path or suffix. Required for `scatter` and `run`. Optional for `run --gather` and `gather` — defaults to stdout if omitted. `/dev/stdout` also accepted. |
 | `-v` | `--verbose` | Print progress to stderr |
 | `-h` | `--help` | Show usage |
 
@@ -235,6 +221,20 @@ For BGZF streams: decompress first block to check. Detected format stored global
 
 **Text** (shards 2..N, opt-in): `--header-pattern` or `--header-n`; default is no stripping.
 
+### Header validation (`#CHROM` line check)
+
+For VCF and BCF, before writing any output, paravar checks that the `#CHROM` line (the tab-separated sample column header) is byte-for-byte identical across all shards. This catches pipelines that reorder or add/remove samples.
+
+**For `run --gather`**: the `#CHROM` line is extracted from shard 0's intercepted stream and stored. Each subsequent shard's interceptor extracts and compares before writing any data. On mismatch: exit 1 with a message identifying which shard failed and showing the differing lines. Kill all in-flight shard pipelines (respects `--no-kill`). Temp files left on disk.
+
+**For `gather`**: extract the `#CHROM` line from each input file's header before concatenating anything. On first mismatch: exit 1 immediately with the differing shard path and lines. No partial output is written.
+
+**For text format**: no header check — text gather is format-agnostic.
+
+**VCF**: `#CHROM` line is the last `#`-prefixed line before data records. Extract from the decompressed header region.
+
+**BCF**: `#CHROM` line is embedded in the `l_text` header blob. Extract by scanning the text for the line beginning with `#CHROM`.
+
 ### Recompression
 
 | Incoming | Output compression | Action |
@@ -248,13 +248,21 @@ For BGZF streams: decompress first block to check. Detected format stored global
 
 Each shard stream ends with a BGZF EOF block (28 bytes). Every interceptor/reader strips this trailing EOF before writing, so `concatenateShards` can write a single EOF at the end of the gather output. Temp shard files do not contain EOF blocks.
 
+### Stdout output
+
+When `-o` is omitted or is `/dev/stdout`, the gather output is written to stdout. Format inference still applies — infer from `/dev/stdout` is not meaningful, so when writing to stdout:
+- Format and compression default to **uncompressed text** unless the sniffed shard format is VCF or BCF, in which case format matches the sniffed format with **no compression** (uncompressed VCF or uncompressed BCF stream)
+- If the user wants a specific compressed format on stdout they should pipe: `paravar gather ... | bgzip -c > out.vcf.gz`
+
+For `run --gather` writing to stdout: shard 0 writes directly to stdout fd. Shards 1..N still use temp files; `concatenateShards` writes them to stdout after all complete.
+
 ### Concatenation
 
-1. Shard 0 → written directly to gather output (no temp file)
+1. Shard 0 → written directly to gather output or stdout (no temp file)
 2. Shards 1..N → written to temp files
-3. After all complete: open gather output in append mode, raw-copy temp files in order
-4. Write single BGZF EOF block if BGZF output
-5. Delete temp files on success; leave on disk and print paths on failure
+3. After all complete: open gather output in append mode (or write to stdout), raw-copy temp files in order
+4. Write single BGZF EOF block if BGZF output (not applicable for stdout uncompressed)
+5. Delete temp files on success; leave on disk and print paths to stderr on failure
 
 For `gather` subcommand (operating on existing files): same logic, no temp files needed — read directly from input files.
 
@@ -277,17 +285,13 @@ For `gather` subcommand (operating on existing files): same logic, no temp files
 
 Execute in order. Do not skip ahead. Update checkboxes as steps complete.
 
-### ⚠️ Pre-work: revert C1 partial implementation
-- [ ] **Step R0**: Read `src/paravar/main.nim` in full. Remove any changes that eliminated subcommand dispatch. Restore explicit `scatter` / `run` / `gather` subcommand handling if it was removed or weakened. Run `nimble test` — full suite must be green before proceeding.
+### CLI refactor + gather (complete)
+- [x] R0: reverted C1 partial implementation
+- [x] C1–C6: subcommands, naming scheme, `:::` separator, `gather` subcommand, test updates
 
-### CLI refactor (current milestone)
-- [ ] **Step C1**: Update `main.nim` to implement four subcommands: `scatter`, `run`, `run --gather`, `gather`. Add `:::` as alias for `---` in pipeline separator parsing. Update all flag parsing per spec above. Run `nimble test` — all existing tests must pass (update test invocations as needed).
-- [ ] **Step C2**: Implement `{}` substitution in output path construction. Implement `mkdir -p` for output parent directories. Implement `shard_XX.` default naming when `{}` absent. Add format mismatch warning. Run `nimble test`.
-- [ ] **Step C3**: Implement `gather` subcommand in `main.nim` dispatch, wiring to existing `gather.nim` logic. Add direct-file path (no temp dir) for `gather`. Write `gather` subcommand tests in `test_gather.nim`. Run `nimble test` — full suite green.
-- [ ] **Step C4**: Update `test_cli.nim`, `test_run.nim`, `test_gather.nim` to use new subcommand CLI throughout. Verify all shard filenames match new naming scheme. Run `nimble test` — full suite green.
-
-### Deferred
-- [ ] `run` with pre-scattered input glob
+### Stdout + header validation (current milestone)
+- [ ] **Step S1**: Implement stdout output for `run --gather` and `gather`: handle omitted `-o` and `/dev/stdout` as stdout fd. Format on stdout is uncompressed matching sniffed format. Write tests for stdout path (omitted `-o`, explicit `/dev/stdout`). Run `nimble test`.
+- [ ] **Step S2**: Implement `#CHROM` header validation in `gather.nim`: `extractChromLine` for VCF and BCF, byte-for-byte comparison, early-exit on mismatch for both `run --gather` (interceptor) and `gather` (pre-scan all files before writing). Write tests covering match, mismatch (hard error), and text format (no check). Run `nimble test` — full suite green.
 
 ---
 
@@ -295,7 +299,7 @@ Execute in order. Do not skip ahead. Update checkboxes as steps complete.
 
 ### Before starting any task
 
-1. Re-read this file in full — especially the ⚠️ REVERT REQUIRED section
+1. Re-read this file in full
 2. Read the relevant source files
 3. Consult `example/scatter_vcf.py` for scatter behaviour questions
 
@@ -303,7 +307,6 @@ Execute in order. Do not skip ahead. Update checkboxes as steps complete.
 
 | Rule | Detail |
 |---|---|
-| **Revert first** | Do not write any new code until R0 is complete and `nimble test` is green |
 | **No new dependencies** | Do not add to `paravar.nimble` without asking |
 | **Test before done** | Run `nimble test` and show full output before declaring any step complete |
 | **No commits** | Stage changes, propose commit message, wait for user |
@@ -343,7 +346,6 @@ const BCF_MAGIC* = [byte('B'), byte('C'), byte('F'), 0x02'u8, 0x02'u8]
 
 ## Out of scope (do not implement)
 
-- `run` with pre-scattered input glob
 - Windows support
 - bcftools as a gather dependency
 - Tools that do not support stdin/stdout

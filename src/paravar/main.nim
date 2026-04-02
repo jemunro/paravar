@@ -150,7 +150,7 @@ proc runUsage() =
   stderr.writeLine ""
   stderr.writeLine "Options:"
   stderr.writeLine "  -n, --n-shards <int>         number of shards (required, >= 1)"
-  stderr.writeLine "  -o, --output <str>           output path or prefix (required)"
+  stderr.writeLine "  -o, --output <str>           output path or prefix (required; optional with --gather, defaults to stdout)"
   stderr.writeLine "  -j, --max-jobs <int>         max concurrent shard pipelines (default: n-shards)"
   stderr.writeLine "  -t, --max-threads <int>      max threads for scatter/validation (default: min(max-jobs, 8))"
   stderr.writeLine "      --force-scan             always scan BGZF blocks (ignore index even if present)"
@@ -274,7 +274,7 @@ proc runRun(rawArgs: seq[string]) =
   if nShards < 1:
     stderr.writeLine "error: -n must be >= 1, got: " & $nShards
     quit(1)
-  if outPrefix == "":
+  if outPrefix == "" and not gatherMode:
     stderr.writeLine "error: -o/--output is required"
     quit(1)
   if inputFile == "":
@@ -293,34 +293,38 @@ proc runRun(rawArgs: seq[string]) =
     nThreads = min(nJobs, 8)
   let (_, stages) = parseRunArgv(rawArgs)
   let shellCmd    = buildShellCmd(stages)
-  warnFormatMismatch(inputFile, outPrefix)
   if gatherMode:
+    let isStdout = (outPrefix == "" or outPrefix == "/dev/stdout")
     let (gFmt, gComp) = inferGatherFormat(outPrefix, "")
     let resolvedTmpDir =
       if tmpDir != "": tmpDir
       else: getEnv("TMPDIR", "/tmp") / "paravar"
     var cfg = GatherConfig(
       format:      gFmt,
-      compression: gComp,
-      outputPath:  outPrefix,
+      compression: if isStdout: gcUncompressed else: gComp,
+      outputPath:  if isStdout: "" else: outPrefix,
       tmpDir:      resolvedTmpDir,
-      shardCount:  nShards)
+      shardCount:  nShards,
+      toStdout:    isStdout)
     if headerPatternSet:
       cfg.headerPattern = some(headerPattern)
     if headerNSet:
       cfg.headerN = some(headerN)
     validateGatherConfig(cfg)
+    if not isStdout:
+      warnFormatMismatch(inputFile, outPrefix)
     runShardsGather(inputFile, nShards, outPrefix, nThreads, forceScan, nJobs,
                     shellCmd, noKill, cfg)
   else:
+    warnFormatMismatch(inputFile, outPrefix)
     runShards(inputFile, nShards, outPrefix, nThreads, forceScan, nJobs, shellCmd, noKill)
 
 proc gatherUsage() =
   ## Print gather subcommand usage to stderr and exit 1.
-  stderr.writeLine "Usage: paravar gather -o <output> [options] <shard1> [<shard2> ...]"
+  stderr.writeLine "Usage: paravar gather [-o <output>] [options] <shard1> [<shard2> ...]"
   stderr.writeLine ""
   stderr.writeLine "Options:"
-  stderr.writeLine "  -o, --output <str>           gather output path (required)"
+  stderr.writeLine "  -o, --output <str>           gather output path (default: stdout)"
   stderr.writeLine "      --header-pattern <pat>   strip lines starting with pat from shards 2..N (text format only)"
   stderr.writeLine "      --header-n <n>           strip the first n lines from shards 2..N (text format only)"
   stderr.writeLine "  -v, --verbose                print progress to stderr"
@@ -367,9 +371,6 @@ proc runGather(rawArgs: seq[string]) =
         quit(1)
     of cmdArgument:
       inputFiles.add(p.key)
-  if outPath == "":
-    stderr.writeLine "error: -o/--output is required"
-    quit(1)
   if inputFiles.len == 0:
     stderr.writeLine "error: at least one input shard file is required"
     quit(1)
@@ -377,20 +378,23 @@ proc runGather(rawArgs: seq[string]) =
     if not fileExists(f):
       stderr.writeLine "error: input file not found: " & f
       quit(1)
+  let isStdout = (outPath == "" or outPath == "/dev/stdout")
   let (gFmt, gComp) = inferGatherFormat(outPath, "")
   var cfg = GatherConfig(
     format:      gFmt,
-    compression: gComp,
-    outputPath:  outPath,
-    shardCount:  inputFiles.len)
+    compression: if isStdout: gcUncompressed else: gComp,
+    outputPath:  if isStdout: "" else: outPath,
+    shardCount:  inputFiles.len,
+    toStdout:    isStdout)
   if headerPatternSet:
     cfg.headerPattern = some(headerPattern)
   if headerNSet:
     cfg.headerN = some(headerN)
   validateGatherConfig(cfg)
-  let outDir = outPath.parentDir
-  if outDir != "":
-    createDir(outDir)
+  if not isStdout:
+    let outDir = outPath.parentDir
+    if outDir != "":
+      createDir(outDir)
   gatherFiles(cfg, inputFiles)
 
 proc mainEntry*() =

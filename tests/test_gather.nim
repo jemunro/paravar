@@ -456,6 +456,11 @@ block testRunInterceptorVcfStrip:
 
   gDetectedFormat = gfVcf
   gStreamIsBgzf   = false
+  # Set gChromLineBuf to match the #CHROM line in vcfData above.
+  let chromStr = "#CHROM\tPOS"
+  gChromLineLen = chromStr.len.int32
+  for k in 0 ..< chromStr.len:
+    gChromLineBuf[k] = byte(chromStr[k])
   gFormatDetected = true
 
   var fds: array[2, cint]
@@ -643,6 +648,10 @@ block testShardStripAndRecompress:
 
   gDetectedFormat = gfVcf
   gStreamIsBgzf   = false
+  let chromStr4 = "#CHROM\tPOS"
+  gChromLineLen = chromStr4.len.int32
+  for k in 0 ..< chromStr4.len:
+    gChromLineBuf[k] = byte(chromStr4[k])
   gFormatDetected = true
 
   var fds: array[2, cint]
@@ -679,6 +688,10 @@ block testShardBgzfInputStripAndRecompress:
 
   gDetectedFormat = gfVcf
   gStreamIsBgzf   = true
+  let chromStr5 = "#CHROM\tPOS"
+  gChromLineLen = chromStr5.len.int32
+  for k in 0 ..< chromStr5.len:
+    gChromLineBuf[k] = byte(chromStr5[k])
   gFormatDetected = true
 
   var fds: array[2, cint]
@@ -1121,15 +1134,54 @@ block testGatherSubcmdBcf:
   echo &"PASS G8.2 gather subcommand BCF: {got} records, content hash matches"
 
 # ---------------------------------------------------------------------------
-# G8.3 — Missing -o exits non-zero
+# G8.3 — Omit -o: output goes to stdout (uncompressed VCF, record count matches)
 # ---------------------------------------------------------------------------
 
-block testGatherSubcmdMissingO:
-  let (outp, code) = runGatherSubcmd("shard1.vcf.gz shard2.vcf.gz")
-  doAssert code != 0, "G8.3: missing -o should exit non-zero"
-  doAssert "o" in outp.toLowerAscii,
-    &"G8.3: error should mention '-o', got: {outp}"
-  echo "PASS G8.3 gather subcommand: missing -o exits non-zero"
+block testGatherSubcmdStdout:
+  let tmpDir = getTempDir() / "paravar_g8_stdout"
+  createDir(tmpDir)
+  let (sOutp, sCode) = execCmdEx(
+    BinPath & &" scatter -n 4 -o {tmpDir}/shard.vcf.gz {SmallVcf} 2>&1")
+  doAssert sCode == 0, &"G8.3 scatter exited {sCode}:\n{sOutp}"
+  var shards: seq[string]
+  for i in 1..4:
+    shards.add(tmpDir / ("shard_" & $i & ".shard.vcf.gz"))
+  let shardsArg = shards.join(" ")
+  # Capture stdout to a file via shell redirection; no -o flag.
+  let stdoutFile = tmpDir / "stdout.vcf"
+  let (gOutp, gCode) = execCmdEx(
+    BinPath & &" gather {shardsArg} > {stdoutFile} 2>&1")
+  doAssert gCode == 0, &"G8.3 gather stdout exited {gCode}:\n{gOutp}"
+  doAssert fileExists(stdoutFile), "G8.3: stdout capture file missing"
+  let got  = countRecords(stdoutFile)
+  let orig = countRecords(SmallVcf)
+  doAssert got == orig, &"G8.3: record count {got} != {orig}"
+  removeDir(tmpDir)
+  echo &"PASS G8.3 gather subcommand stdout: {got} records written to stdout"
+
+# ---------------------------------------------------------------------------
+# G8.3b — /dev/stdout explicit path also works
+# ---------------------------------------------------------------------------
+
+block testGatherSubcmdDevStdout:
+  let tmpDir = getTempDir() / "paravar_g8_devstdout"
+  createDir(tmpDir)
+  let (sOutp, sCode) = execCmdEx(
+    BinPath & &" scatter -n 4 -o {tmpDir}/shard.vcf.gz {SmallVcf} 2>&1")
+  doAssert sCode == 0, &"G8.3b scatter exited {sCode}:\n{sOutp}"
+  var shards: seq[string]
+  for i in 1..4:
+    shards.add(tmpDir / ("shard_" & $i & ".shard.vcf.gz"))
+  let shardsArg = shards.join(" ")
+  let stdoutFile = tmpDir / "stdout.vcf"
+  let (gOutp, gCode) = execCmdEx(
+    BinPath & &" gather -o /dev/stdout {shardsArg} > {stdoutFile} 2>&1")
+  doAssert gCode == 0, &"G8.3b gather /dev/stdout exited {gCode}:\n{gOutp}"
+  let got  = countRecords(stdoutFile)
+  let orig = countRecords(SmallVcf)
+  doAssert got == orig, &"G8.3b: record count {got} != {orig}"
+  removeDir(tmpDir)
+  echo &"PASS G8.3b gather subcommand /dev/stdout: {got} records"
 
 # ---------------------------------------------------------------------------
 # G8.4 — No input files exits non-zero
@@ -1159,5 +1211,170 @@ block testGatherSubcmdMissingFile:
   removeDir(tmpDir)
   echo "PASS G8.5 gather subcommand: missing input file exits non-zero"
 
+# ---------------------------------------------------------------------------
+# G8.6 — run --gather without -o: output goes to stdout
+# ---------------------------------------------------------------------------
+
+block testRunGatherStdout:
+  let tmpDir = getTempDir() / "paravar_g8_rungather_stdout"
+  createDir(tmpDir)
+  let stdoutFile = tmpDir / "stdout.vcf"
+  # No -o; stdout is captured via shell redirection.
+  let (outp, code) = execCmdEx(
+    BinPath & &" run --gather -n 4 {SmallVcf} ::: cat > {stdoutFile} 2>&1")
+  doAssert code == 0, &"G8.6 run --gather stdout exited {code}:\n{outp}"
+  let got  = countRecords(stdoutFile)
+  let orig = countRecords(SmallVcf)
+  doAssert got == orig, &"G8.6: record count {got} != {orig}"
+  removeDir(tmpDir)
+  echo &"PASS G8.6 run --gather stdout: {got} records written to stdout"
+
 echo ""
 echo "All gather G8 subcommand integration tests passed."
+
+# ===========================================================================
+# S2 — #CHROM header validation tests
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# S2.1 — extractChromLine: finds #CHROM in VCF header bytes
+# ---------------------------------------------------------------------------
+
+block testExtractChromLineVcf:
+  var header: seq[byte]
+  for c in "##fileformat=VCFv4.2\n##INFO=<ID=DP>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n":
+    header.add(byte(c))
+  let line = extractChromLine(header)
+  doAssert line.startsWith("#CHROM"), &"S2.1: expected '#CHROM...' got '{line}'"
+  echo "PASS S2.1 extractChromLine: found #CHROM in VCF header bytes"
+
+# ---------------------------------------------------------------------------
+# S2.2 — extractChromLine: returns "" when not found
+# ---------------------------------------------------------------------------
+
+block testExtractChromLineNotFound:
+  var data: seq[byte]
+  for c in "##fileformat=VCFv4.2\n##INFO=<ID=DP>\n":
+    data.add(byte(c))
+  let line = extractChromLine(data)
+  doAssert line == "", &"S2.2: expected '' got '{line}'"
+  echo "PASS S2.2 extractChromLine: returns empty string when not found"
+
+# ---------------------------------------------------------------------------
+# S2.3 — chromLineFromBytes: works on BGZF VCF file bytes
+# ---------------------------------------------------------------------------
+
+block testChromLineFromBytesVcf:
+  doAssert fileExists(SmallVcf), "S2.3: VCF fixture missing"
+  let fileSize = getFileSize(SmallVcf).int
+  var allBytes = newSeq[byte](fileSize)
+  let f = open(SmallVcf, fmRead)
+  discard readBytes(f, allBytes, 0, fileSize)
+  f.close()
+  let (fmt, isBgzf) = sniffStreamFormat(allBytes)
+  doAssert fmt == gfVcf, &"S2.3: expected gfVcf, got {fmt}"
+  let line = chromLineFromBytes(allBytes, fmt, isBgzf)
+  doAssert line.startsWith("#CHROM"), &"S2.3: expected '#CHROM...' got '{line}'"
+  echo "PASS S2.3 chromLineFromBytes: found #CHROM in BGZF VCF"
+
+# ---------------------------------------------------------------------------
+# S2.4 — chromLineFromBytes: works on BGZF BCF file bytes
+# ---------------------------------------------------------------------------
+
+block testChromLineFromBytesBcf:
+  doAssert fileExists(SmallBcf), "S2.4: BCF fixture missing"
+  let fileSize = getFileSize(SmallBcf).int
+  var allBytes = newSeq[byte](fileSize)
+  let f = open(SmallBcf, fmRead)
+  discard readBytes(f, allBytes, 0, fileSize)
+  f.close()
+  let (fmt, isBgzf) = sniffStreamFormat(allBytes)
+  doAssert fmt == gfBcf, &"S2.4: expected gfBcf, got {fmt}"
+  let line = chromLineFromBytes(allBytes, fmt, isBgzf)
+  doAssert line.startsWith("#CHROM"), &"S2.4: expected '#CHROM...' got '{line}'"
+  echo "PASS S2.4 chromLineFromBytes: found #CHROM in BGZF BCF"
+
+# ---------------------------------------------------------------------------
+# S2.5 — chromLineFromFile: matches chromLineFromBytes
+# ---------------------------------------------------------------------------
+
+block testChromLineFromFile:
+  doAssert fileExists(SmallVcf), "S2.5: VCF fixture missing"
+  let fileSize = getFileSize(SmallVcf).int
+  var allBytes = newSeq[byte](fileSize)
+  let f = open(SmallVcf, fmRead)
+  discard readBytes(f, allBytes, 0, fileSize)
+  f.close()
+  let (fmt, isBgzf) = sniffStreamFormat(allBytes)
+  let fromBytes = chromLineFromBytes(allBytes, fmt, isBgzf)
+  let fromFile  = chromLineFromFile(SmallVcf, fmt, isBgzf)
+  doAssert fromBytes == fromFile,
+    &"S2.5: chromLineFromFile != chromLineFromBytes (got '{fromFile}' vs '{fromBytes}')"
+  doAssert fromBytes.startsWith("#CHROM"), &"S2.5: expected '#CHROM...' got '{fromBytes}'"
+  echo "PASS S2.5 chromLineFromFile: matches chromLineFromBytes result"
+
+# ---------------------------------------------------------------------------
+# S2.6 — gather subcommand: matching #CHROM lines → success
+# ---------------------------------------------------------------------------
+
+block testGatherChromMatch:
+  let tmpDir = getTempDir() / "paravar_s2_match"
+  createDir(tmpDir)
+  let (sOutp, sCode) = execCmdEx(
+    BinPath & &" scatter -n 4 -o {tmpDir}/shard.vcf.gz {SmallVcf} 2>&1")
+  doAssert sCode == 0, &"S2.6 scatter exited {sCode}:\n{sOutp}"
+  var shards: seq[string]
+  for i in 1..4:
+    shards.add(tmpDir / ("shard_" & $i & ".shard.vcf.gz"))
+  let outPath = tmpDir / "merged.vcf.gz"
+  let (gOutp, gCode) = runGatherSubcmd(&"-o {outPath} " & shards.join(" "))
+  doAssert gCode == 0, &"S2.6: gather with matching #CHROM should succeed, got {gCode}:\n{gOutp}"
+  let got  = countRecords(outPath)
+  let orig = countRecords(SmallVcf)
+  doAssert got == orig, &"S2.6: record count {got} != {orig}"
+  removeDir(tmpDir)
+  echo &"PASS S2.6 gather #CHROM match: {got} records, success"
+
+# ---------------------------------------------------------------------------
+# S2.7 — gather subcommand: mismatched #CHROM → exit 1, no partial output
+# ---------------------------------------------------------------------------
+
+block testGatherChromMismatch:
+  # Build two synthetic BGZF-VCF files with different sample columns.
+  let tmpDir = getTempDir() / "paravar_s2_mismatch"
+  removeDir(tmpDir)
+  createDir(tmpDir)
+  let vcfA =
+    "##fileformat=VCFv4.2\n" &
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSampleA\n" &
+    "1\t100\t.\tA\tT\t.\tPASS\t.\tGT\t0/1\n"
+  let vcfB =
+    "##fileformat=VCFv4.2\n" &
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSampleB\n" &
+    "1\t200\t.\tG\tC\t.\tPASS\t.\tGT\t1/1\n"
+  var rawA, rawB: seq[byte]
+  for c in vcfA: rawA.add(byte(c))
+  for c in vcfB: rawB.add(byte(c))
+  let shardA = tmpDir / "shardA.vcf.gz"
+  let shardB = tmpDir / "shardB.vcf.gz"
+  block:
+    var dataA = compressToBgzfMulti(rawA); dataA.add(@BGZF_EOF)
+    let fA = open(shardA, fmWrite)
+    discard fA.writeBytes(dataA, 0, dataA.len); fA.close()
+  block:
+    var dataB = compressToBgzfMulti(rawB); dataB.add(@BGZF_EOF)
+    let fB = open(shardB, fmWrite)
+    discard fB.writeBytes(dataB, 0, dataB.len); fB.close()
+
+  let outPath = tmpDir / "merged.vcf.gz"
+  let (gOutp, gCode) = runGatherSubcmd(&"-o {outPath} {shardA} {shardB}")
+  doAssert gCode != 0, &"S2.7: mismatched #CHROM should exit non-zero, got {gCode}"
+  doAssert not fileExists(outPath) or getFileSize(outPath) == 0,
+    "S2.7: partial output should not exist"
+  doAssert "chrom" in gOutp.toLowerAscii or "mismatch" in gOutp.toLowerAscii,
+    &"S2.7: error message should mention mismatch, got: {gOutp}"
+  removeDir(tmpDir)
+  echo "PASS S2.7 gather #CHROM mismatch: exits 1, no partial output"
+
+echo ""
+echo "All S2 #CHROM validation tests passed."

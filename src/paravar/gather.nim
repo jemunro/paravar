@@ -26,6 +26,7 @@ type
     headerPattern*: Option[string]   ## --header-pattern; None = not set
     headerN*:       Option[int]      ## --header-n; None = not set
     shardCount*:    int
+    toStdout*:      bool             ## write output to stdout instead of outputPath
 
 proc `$`*(f: GatherFormat): string =
   ## Human-readable format name for messages.
@@ -140,6 +141,11 @@ proc sniffStreamFormat*(rawHead: openArray[byte]): (GatherFormat, bool) =
 var gDetectedFormat*: GatherFormat   ## Format detected from shard 0 stream.
 var gFormatDetected*: bool = false   ## Whether gDetectedFormat has been written.
 var gStreamIsBgzf*:   bool = false   ## Whether shard 0 stream was BGZF-compressed.
+## #CHROM line from shard 0, stored as a raw byte array (GC-safe for spawn).
+## Set before gFormatDetected = true.
+const gChromLineCap* = 131072   ## 128 KB — enough for any practical sample list.
+var gChromLineBuf*: array[gChromLineCap, byte]
+var gChromLineLen*: int32 = 0
 
 # ---------------------------------------------------------------------------
 # G3 — Header stripping helpers
@@ -240,130 +246,235 @@ proc findBcfHeaderEnd*(data: seq[byte]): int =
   return -1
 
 # ---------------------------------------------------------------------------
+# S2 — #CHROM line extraction helpers
+# ---------------------------------------------------------------------------
+
+proc extractChromLine*(data: seq[byte]): string =
+  ## Return the first line starting with "#CHROM" from uncompressed bytes.
+  ## Returns "" if not found.
+  const chromPrefix = "#CHROM"
+  var i = 0
+  while i < data.len:
+    var j = i
+    while j < data.len and data[j] != byte('\n'): j += 1
+    let lineLen = j - i
+    if lineLen >= chromPrefix.len:
+      var match = true
+      for k in 0 ..< chromPrefix.len:
+        if data[i + k] != byte(chromPrefix[k]):
+          match = false; break
+      if match:
+        var s = newString(lineLen)
+        for k in 0 ..< lineLen: s[k] = char(data[i + k])
+        return s
+    i = j + 1
+  return ""
+
+proc chromLineFromBytes*(rawBytes: seq[byte]; fmt: GatherFormat; isBgzf: bool): string =
+  ## Extract the #CHROM line from raw (possibly BGZF-compressed) shard bytes.
+  ## Decompresses only enough BGZF blocks to find the header boundary.
+  ## Returns "" for text format or if not found.
+  if fmt == gfText: return ""
+  if isBgzf:
+    var decompBuf: seq[byte]
+    var pos = 0
+    while pos < rawBytes.len:
+      let blkSize = bgzfBlockSize(rawBytes.toOpenArray(pos, rawBytes.high))
+      if blkSize <= 0: break
+      decompBuf.add(decompressBgzf(rawBytes.toOpenArray(pos, pos + blkSize - 1)))
+      pos += blkSize
+      let hEnd =
+        if fmt == gfBcf: findBcfHeaderEnd(decompBuf)
+        else:            findVcfHeaderEnd(decompBuf)
+      if hEnd >= 0:
+        return extractChromLine(decompBuf[0 ..< hEnd])
+    return extractChromLine(decompBuf)
+  else:
+    let hEnd =
+      if fmt == gfBcf: findBcfHeaderEnd(rawBytes)
+      else:            findVcfHeaderEnd(rawBytes)
+    let limit = if hEnd >= 0: hEnd else: rawBytes.len
+    return extractChromLine(rawBytes[0 ..< limit])
+
+proc chromLineFromFile*(path: string; fmt: GatherFormat; isBgzf: bool): string =
+  ## Read just enough bytes from path to extract the #CHROM line.
+  ## Returns "" for text format or if not found within the header.
+  if fmt == gfText: return ""
+  let f = open(path, fmRead)
+  defer: f.close()
+  const BufSize = 65536
+  var buf = newSeq[byte](BufSize)
+  var rawBuf: seq[byte]
+  var decompBuf: seq[byte]
+  var blockPos = 0
+  while decompBuf.len < 10 * 1024 * 1024:  # 10 MB safety limit
+    let got = readBytes(f, buf, 0, BufSize)
+    if got <= 0: break
+    rawBuf.add(buf[0 ..< got])
+    while blockPos + 18 <= rawBuf.len:
+      let blkSize = bgzfBlockSize(rawBuf.toOpenArray(blockPos, rawBuf.high))
+      if blkSize <= 0 or blockPos + blkSize > rawBuf.len: break
+      decompBuf.add(decompressBgzf(rawBuf.toOpenArray(blockPos, blockPos + blkSize - 1)))
+      blockPos += blkSize
+    let hEnd =
+      if fmt == gfBcf: findBcfHeaderEnd(decompBuf)
+      else:            findVcfHeaderEnd(decompBuf)
+    if hEnd >= 0:
+      return extractChromLine(decompBuf[0 ..< hEnd])
+  return extractChromLine(decompBuf)
+
+# ---------------------------------------------------------------------------
 # Interceptor thread proc
 # ---------------------------------------------------------------------------
 
 proc runInterceptor*(cfg: GatherConfig; shardIdx: int; inputFd: cint; tmpPath: string): int =
   ## Per-shard interceptor thread proc. Reads from inputFd, strips headers for
-  ## shards 2..N, recompresses if needed, writes to tmpPath. Returns 0.
+  ## shards 2..N, recompresses if needed, writes to tmpPath (or stdout for
+  ## shard 0 when cfg.toStdout). Returns 0 on success.
   ## G2: format sniffing on shard 0.
   ## G3: header stripping for shards 1..N.
   ## G4: recompression (uncompressed↔BGZF) for all shards.
-  let outFile = open(tmpPath, fmWrite)
-  defer:
-    outFile.close()
-    discard posix.close(inputFd)
+  let isStdout = (shardIdx == 0 and cfg.toStdout)
+  let outFile: File = if isStdout: stdout else: open(tmpPath, fmWrite)
+  try:
+    const ChunkSize = 65536
+    var buf = newSeq[byte](ChunkSize)
 
-  const ChunkSize = 65536
-  var buf = newSeq[byte](ChunkSize)
+    # Read the first chunk; used for format sniffing on shard 0.
+    let initRead = posix.read(inputFd, cast[pointer](addr buf[0]), ChunkSize)
+    if initRead <= 0:
+      return 0
+    let head = buf[0 ..< initRead]
 
-  # Read the first chunk; used for format sniffing on shard 0.
-  let initRead = posix.read(inputFd, cast[pointer](addr buf[0]), ChunkSize)
-  if initRead <= 0:
-    return
-  let head = buf[0 ..< initRead]
+    if shardIdx == 0:
+      let (fmt, isBgzf) = sniffStreamFormat(head)
+      gDetectedFormat = fmt
+      gStreamIsBgzf   = isBgzf
+      # gFormatDetected is NOT set here — set after gChromLine is extracted below,
+      # so that shards 1..N see both globals atomically when they stop waiting.
+      if fmt != cfg.format and not cfg.toStdout:
+        stderr.writeLine &"warning: stream format detected as {fmt} " &
+          &"but --gather expects {cfg.format}; proceeding"
 
-  if shardIdx == 0:
-    let (fmt, isBgzf) = sniffStreamFormat(head)
-    gDetectedFormat = fmt
-    gStreamIsBgzf   = isBgzf
-    gFormatDetected = true
-    if fmt != cfg.format:
-      stderr.writeLine &"warning: stream format detected as {fmt} " &
-        &"but --gather expects {cfg.format}; proceeding"
+    # Buffer the full stream (head + remainder).
+    var allBytes: seq[byte]
+    allBytes.add(head)
+    while true:
+      let got = posix.read(inputFd, cast[pointer](addr buf[0]), ChunkSize)
+      if got <= 0: break
+      allBytes.add(buf[0 ..< got])
 
-  # Buffer the full stream (head + remainder).
-  var allBytes: seq[byte]
-  allBytes.add(head)
-  while true:
-    let got = posix.read(inputFd, cast[pointer](addr buf[0]), ChunkSize)
-    if got <= 0: break
-    allBytes.add(buf[0 ..< got])
-
-  if shardIdx == 0:
-    # Shard 0: no header stripping; apply recompression only.
-    let toWrite: seq[byte] =
-      if gStreamIsBgzf and cfg.compression == gcUncompressed:
-        # BGZF input → uncompressed output: decompress.
-        decompressAllBgzfBlocks(allBytes)
-      elif not gStreamIsBgzf and cfg.compression == gcBgzf:
-        # Uncompressed input → BGZF output: compress.
-        compressToBgzfMulti(allBytes)
-      else:
-        # BGZF→BGZF or uncompressed→uncompressed: pass raw bytes through.
-        # For BGZF streams: strip the terminal EOF block appended by the pipeline —
-        # concatenateShards writes a single EOF block once at the very end.
-        if gStreamIsBgzf and allBytes.len >= BGZF_EOF.len and
-           allBytes[allBytes.len - BGZF_EOF.len ..< allBytes.len] == @BGZF_EOF:
-          allBytes[0 ..< allBytes.len - BGZF_EOF.len]
-        else:
-          allBytes
-    discard outFile.writeBytes(toWrite, 0, toWrite.len)
-  else:
-    # Shards 1..N: wait until shard 0 has finished sniffing (sets gFormatDetected).
-    # Small shards may buffer all their pipeline output before shard 0 reads its
-    # first chunk — spin (1 ms sleep per iteration) until the flag is ready.
-    while not gFormatDetected:
-      sleep(1)
-    let fmt = gDetectedFormat
-    if gStreamIsBgzf and fmt in {gfVcf, gfBcf}:
-      # Optimised path: decompress only the header-containing blocks, then
-      # raw-copy (or decompress-and-write) the remaining data blocks.
-      var blockPos = 0
-      var decompAccum: seq[byte]
-      var headerEnd = -1
-      # Phase 1: decompress blocks until the full header is in decompAccum.
-      while blockPos < allBytes.len and headerEnd < 0:
-        let blkSize = bgzfBlockSize(allBytes.toOpenArray(blockPos, allBytes.high))
-        if blkSize <= 0: break
-        decompAccum.add(
-          decompressBgzf(allBytes.toOpenArray(blockPos, blockPos + blkSize - 1)))
-        blockPos += blkSize
-        headerEnd =
-          if fmt == gfBcf: findBcfHeaderEnd(decompAccum)
-          else:             findVcfHeaderEnd(decompAccum)
-      if headerEnd < 0: headerEnd = decompAccum.len  # edge: all-header shard
-      # Phase 2: write the post-header tail from the last decompressed block.
-      let tail = decompAccum[headerEnd ..< decompAccum.len]
-      if tail.len > 0:
-        let chunk =
-          if cfg.compression == gcBgzf: compressToBgzfMulti(tail)
-          else: tail
-        discard outFile.writeBytes(chunk, 0, chunk.len)
-      # Phase 3: stream remaining blocks — raw pass-through for BGZF output,
-      # decompress-and-write for uncompressed output.
-      while blockPos < allBytes.len:
-        let blkSize = bgzfBlockSize(allBytes.toOpenArray(blockPos, allBytes.high))
-        if blkSize <= 0: break
-        if cfg.compression == gcBgzf:
-          discard outFile.writeBytes(allBytes, blockPos, blkSize)
-        else:
-          let d = decompressBgzf(allBytes.toOpenArray(blockPos, blockPos + blkSize - 1))
-          discard outFile.writeBytes(d, 0, d.len)
-        blockPos += blkSize
-    else:
-      # General path: uncompressed input or text+BGZF — decompress all, strip, write.
-      let data: seq[byte] =
-        if gStreamIsBgzf: decompressAllBgzfBlocks(allBytes)
-        else: allBytes
-      let stripped: seq[byte] =
-        case fmt
-        of gfBcf:
-          stripBcfHeader(data)
-        of gfVcf:
-          stripLinesByPattern(data, "#")
-        of gfText:
-          if cfg.headerPattern.isSome:
-            stripLinesByPattern(data, cfg.headerPattern.get)
-          elif cfg.headerN.isSome:
-            stripFirstNLines(data, cfg.headerN.get)
-          else:
-            data
+    if shardIdx == 0:
+      # Extract #CHROM line into the raw byte buffer, then release shards 1..N.
+      # Using a non-GC-managed global (byte array) so this proc stays GC-safe.
+      let chromStr = chromLineFromBytes(allBytes, gDetectedFormat, gStreamIsBgzf)
+      gChromLineLen = min(chromStr.len, gChromLineCap).int32
+      for k in 0 ..< gChromLineLen.int:
+        gChromLineBuf[k] = byte(chromStr[k])
+      gFormatDetected = true
+      # Shard 0: no header stripping; apply recompression only.
       let toWrite: seq[byte] =
-        if cfg.compression == gcBgzf: compressToBgzfMulti(stripped)
-        else: stripped
+        if gStreamIsBgzf and cfg.compression == gcUncompressed:
+          # BGZF input → uncompressed output: decompress.
+          decompressAllBgzfBlocks(allBytes)
+        elif not gStreamIsBgzf and cfg.compression == gcBgzf:
+          # Uncompressed input → BGZF output: compress.
+          compressToBgzfMulti(allBytes)
+        else:
+          # BGZF→BGZF or uncompressed→uncompressed: pass raw bytes through.
+          # For BGZF streams: strip the terminal EOF block appended by the pipeline —
+          # concatenateShards writes a single EOF block once at the very end.
+          if gStreamIsBgzf and allBytes.len >= BGZF_EOF.len and
+             allBytes[allBytes.len - BGZF_EOF.len ..< allBytes.len] == @BGZF_EOF:
+            allBytes[0 ..< allBytes.len - BGZF_EOF.len]
+          else:
+            allBytes
       discard outFile.writeBytes(toWrite, 0, toWrite.len)
-  result = 0
+    else:
+      # Shards 1..N: wait until shard 0 has extracted its #CHROM line and set
+      # gFormatDetected = true.  Small shards may buffer all output before shard 0
+      # reads its first chunk — spin-wait (1 ms per iteration) until ready.
+      while not gFormatDetected:
+        sleep(1)
+      let fmt = gDetectedFormat
+      # Validate #CHROM before writing anything.
+      if fmt in {gfVcf, gfBcf}:
+        let myChromLine = chromLineFromBytes(allBytes, fmt, gStreamIsBgzf)
+        let glen = gChromLineLen.int
+        var match = (myChromLine.len == glen)
+        if match:
+          for k in 0 ..< glen:
+            if byte(myChromLine[k]) != gChromLineBuf[k]:
+              match = false; break
+        if not match:
+          # Reconstruct shard 0's line as string for the error message.
+          var shard0Line = newString(glen)
+          for k in 0 ..< glen: shard0Line[k] = char(gChromLineBuf[k])
+          stderr.writeLine &"error: gather: #CHROM line mismatch at shard {shardIdx + 1}:"
+          stderr.writeLine &"  shard 1: {shard0Line}"
+          stderr.writeLine &"  shard {shardIdx + 1}: {myChromLine}"
+          return 1
+      if gStreamIsBgzf and fmt in {gfVcf, gfBcf}:
+        # Optimised path: decompress only the header-containing blocks, then
+        # raw-copy (or decompress-and-write) the remaining data blocks.
+        var blockPos = 0
+        var decompAccum: seq[byte]
+        var headerEnd = -1
+        # Phase 1: decompress blocks until the full header is in decompAccum.
+        while blockPos < allBytes.len and headerEnd < 0:
+          let blkSize = bgzfBlockSize(allBytes.toOpenArray(blockPos, allBytes.high))
+          if blkSize <= 0: break
+          decompAccum.add(
+            decompressBgzf(allBytes.toOpenArray(blockPos, blockPos + blkSize - 1)))
+          blockPos += blkSize
+          headerEnd =
+            if fmt == gfBcf: findBcfHeaderEnd(decompAccum)
+            else:             findVcfHeaderEnd(decompAccum)
+        if headerEnd < 0: headerEnd = decompAccum.len  # edge: all-header shard
+        # Phase 2: write the post-header tail from the last decompressed block.
+        let tail = decompAccum[headerEnd ..< decompAccum.len]
+        if tail.len > 0:
+          let chunk =
+            if cfg.compression == gcBgzf: compressToBgzfMulti(tail)
+            else: tail
+          discard outFile.writeBytes(chunk, 0, chunk.len)
+        # Phase 3: stream remaining blocks — raw pass-through for BGZF output,
+        # decompress-and-write for uncompressed output.
+        while blockPos < allBytes.len:
+          let blkSize = bgzfBlockSize(allBytes.toOpenArray(blockPos, allBytes.high))
+          if blkSize <= 0: break
+          if cfg.compression == gcBgzf:
+            discard outFile.writeBytes(allBytes, blockPos, blkSize)
+          else:
+            let d = decompressBgzf(allBytes.toOpenArray(blockPos, blockPos + blkSize - 1))
+            discard outFile.writeBytes(d, 0, d.len)
+          blockPos += blkSize
+      else:
+        # General path: uncompressed input or text+BGZF — decompress all, strip, write.
+        let data: seq[byte] =
+          if gStreamIsBgzf: decompressAllBgzfBlocks(allBytes)
+          else: allBytes
+        let stripped: seq[byte] =
+          case fmt
+          of gfBcf:
+            stripBcfHeader(data)
+          of gfVcf:
+            stripLinesByPattern(data, "#")
+          of gfText:
+            if cfg.headerPattern.isSome:
+              stripLinesByPattern(data, cfg.headerPattern.get)
+            elif cfg.headerN.isSome:
+              stripFirstNLines(data, cfg.headerN.get)
+            else:
+              data
+        let toWrite: seq[byte] =
+          if cfg.compression == gcBgzf: compressToBgzfMulti(stripped)
+          else: stripped
+        discard outFile.writeBytes(toWrite, 0, toWrite.len)
+    result = 0
+  finally:
+    if not isStdout: outFile.close()
+    discard posix.close(inputFd)
 
 # ---------------------------------------------------------------------------
 # G5 — cleanup and concatenation
@@ -382,15 +493,15 @@ proc cleanupTempDir*(tmpDir: string; tmpPaths: seq[string]; success: bool) =
       stderr.writeLine "  " & p
 
 proc concatenateShards*(cfg: GatherConfig; tmpPaths: seq[string]) =
-  ## Raw-copy each temp shard file (in order) into cfg.outputPath.
+  ## Raw-copy each temp shard file (in order) into cfg.outputPath (or stdout).
   ## Appends a single BGZF EOF block at the end when cfg.compression == gcBgzf.
   ## Calls cleanupTempDir on success.
-  let outFile = open(cfg.outputPath, fmAppend)
+  let outFile: File = if cfg.toStdout: stdout else: open(cfg.outputPath, fmAppend)
   for p in tmpPaths:
     rawCopyBytes(p, outFile, 0, getFileSize(p))
   if cfg.compression == gcBgzf:
     discard outFile.writeBytes(BGZF_EOF, 0, BGZF_EOF.len)
-  outFile.close()
+  if not cfg.toStdout: outFile.close()
   cleanupTempDir(cfg.tmpDir, tmpPaths, true)
 
 # ---------------------------------------------------------------------------
@@ -398,8 +509,9 @@ proc concatenateShards*(cfg: GatherConfig; tmpPaths: seq[string]) =
 # ---------------------------------------------------------------------------
 
 proc gatherFiles*(cfg: GatherConfig; inputPaths: seq[string]) =
-  ## Concatenate pre-existing shard files into cfg.outputPath.
+  ## Concatenate pre-existing shard files into cfg.outputPath (or stdout).
   ## Shard 0 is written with its header intact; shards 1..N have headers stripped.
+  ## For VCF/BCF: validates that #CHROM lines match before writing anything.
   ## No temp files are created.  Resets the global format-detection state.
   if inputPaths.len == 0:
     stderr.writeLine "error: gather: no input files provided"
@@ -407,92 +519,115 @@ proc gatherFiles*(cfg: GatherConfig; inputPaths: seq[string]) =
   gFormatDetected = false
   gDetectedFormat = gfText
   gStreamIsBgzf   = false
-  let outFile = open(cfg.outputPath, fmWrite)
-  for i, path in inputPaths:
-    let fileSize = getFileSize(path)
-    var allBytes = newSeq[byte](fileSize.int)
-    let f = open(path, fmRead)
-    discard readBytes(f, allBytes, 0, allBytes.len)
-    f.close()
-    # Format detection from shard 0.
-    if i == 0:
-      let (fmt, isBgzf) = sniffStreamFormat(allBytes)
-      gDetectedFormat = fmt
-      gStreamIsBgzf   = isBgzf
-      gFormatDetected = true
-      if fmt != cfg.format:
-        stderr.writeLine &"warning: shard 0 format detected as {fmt} " &
-          &"but output expects {cfg.format}; proceeding"
-    # Strip the terminal BGZF EOF block if present — we write a single EOF at the end.
+  gChromLineLen   = 0
+
+  # ── Phase 1: read shard 0, detect format, validate #CHROM ──────────────────
+  let s0Size = getFileSize(inputPaths[0]).int
+  var s0Bytes = newSeq[byte](s0Size)
+  block:
+    let fs0 = open(inputPaths[0], fmRead)
+    discard readBytes(fs0, s0Bytes, 0, s0Size)
+    fs0.close()
+  let (fmt, isBgzf) = sniffStreamFormat(s0Bytes)
+  gDetectedFormat = fmt
+  gStreamIsBgzf   = isBgzf
+  gFormatDetected = true
+  if fmt != cfg.format and not cfg.toStdout:
+    stderr.writeLine &"warning: shard 0 format detected as {fmt} " &
+      &"but output expects {cfg.format}; proceeding"
+
+  if fmt in {gfVcf, gfBcf}:
+    let chrom0 = chromLineFromBytes(s0Bytes, fmt, isBgzf)
+    for j in 1 ..< inputPaths.len:
+      let chromJ = chromLineFromFile(inputPaths[j], fmt, isBgzf)
+      if chromJ != chrom0:
+        stderr.writeLine &"error: gather: #CHROM line mismatch between shard 1 and shard {j+1} ({inputPaths[j]}):"
+        stderr.writeLine &"  shard 1: {chrom0}"
+        stderr.writeLine &"  shard {j+1}: {chromJ}"
+        quit(1)
+
+  # ── Phase 2: open output, write shard 0 then shards 1..N ───────────────────
+  let outFile: File = if cfg.toStdout: stdout else: open(cfg.outputPath, fmWrite)
+
+  # Write shard 0 (bytes already buffered in s0Bytes).
+  var bytes0 = s0Bytes
+  if isBgzf and bytes0.len >= BGZF_EOF.len and
+     bytes0[bytes0.len - BGZF_EOF.len ..< bytes0.len] == @BGZF_EOF:
+    bytes0 = bytes0[0 ..< bytes0.len - BGZF_EOF.len]
+  let toWrite0: seq[byte] =
+    if isBgzf and cfg.compression == gcUncompressed:
+      decompressAllBgzfBlocks(bytes0)
+    elif not isBgzf and cfg.compression == gcBgzf:
+      compressToBgzfMulti(bytes0)
+    else:
+      bytes0
+  discard outFile.writeBytes(toWrite0, 0, toWrite0.len)
+
+  # Write shards 1..N: read fresh from disk, strip headers.
+  for j in 1 ..< inputPaths.len:
+    let jSize = getFileSize(inputPaths[j]).int
+    var allBytes = newSeq[byte](jSize)
+    block:
+      let fj = open(inputPaths[j], fmRead)
+      discard readBytes(fj, allBytes, 0, jSize)
+      fj.close()
+    # Strip trailing BGZF EOF block.
     var bytes = allBytes
-    if gStreamIsBgzf and bytes.len >= BGZF_EOF.len and
+    if isBgzf and bytes.len >= BGZF_EOF.len and
        bytes[bytes.len - BGZF_EOF.len ..< bytes.len] == @BGZF_EOF:
       bytes = bytes[0 ..< bytes.len - BGZF_EOF.len]
-    if i == 0:
-      # Shard 0: no header stripping; apply recompression if needed.
-      let toWrite: seq[byte] =
-        if gStreamIsBgzf and cfg.compression == gcUncompressed:
-          decompressAllBgzfBlocks(bytes)
-        elif not gStreamIsBgzf and cfg.compression == gcBgzf:
-          compressToBgzfMulti(bytes)
+    if isBgzf and fmt in {gfVcf, gfBcf}:
+      # Optimised path: decompress only the header-containing blocks, then
+      # stream the remaining data blocks.
+      var blockPos = 0
+      var decompAccum: seq[byte]
+      var headerEnd = -1
+      while blockPos < bytes.len and headerEnd < 0:
+        let blkSize = bgzfBlockSize(bytes.toOpenArray(blockPos, bytes.high))
+        if blkSize <= 0: break
+        decompAccum.add(
+          decompressBgzf(bytes.toOpenArray(blockPos, blockPos + blkSize - 1)))
+        blockPos += blkSize
+        headerEnd =
+          if fmt == gfBcf: findBcfHeaderEnd(decompAccum)
+          else:             findVcfHeaderEnd(decompAccum)
+      if headerEnd < 0: headerEnd = decompAccum.len
+      let tail = decompAccum[headerEnd ..< decompAccum.len]
+      if tail.len > 0:
+        let chunk =
+          if cfg.compression == gcBgzf: compressToBgzfMulti(tail)
+          else: tail
+        discard outFile.writeBytes(chunk, 0, chunk.len)
+      while blockPos < bytes.len:
+        let blkSize = bgzfBlockSize(bytes.toOpenArray(blockPos, bytes.high))
+        if blkSize <= 0: break
+        if cfg.compression == gcBgzf:
+          discard outFile.writeBytes(bytes, blockPos, blkSize)
         else:
-          bytes
-      discard outFile.writeBytes(toWrite, 0, toWrite.len)
+          let d = decompressBgzf(bytes.toOpenArray(blockPos, blockPos + blkSize - 1))
+          discard outFile.writeBytes(d, 0, d.len)
+        blockPos += blkSize
     else:
-      # Shards 1..N: strip headers.
-      let fmt = gDetectedFormat
-      if gStreamIsBgzf and fmt in {gfVcf, gfBcf}:
-        # Optimised path: decompress only the header-containing blocks, then
-        # stream the remaining data blocks (EOF already stripped above).
-        var blockPos = 0
-        var decompAccum: seq[byte]
-        var headerEnd = -1
-        while blockPos < bytes.len and headerEnd < 0:
-          let blkSize = bgzfBlockSize(bytes.toOpenArray(blockPos, bytes.high))
-          if blkSize <= 0: break
-          decompAccum.add(
-            decompressBgzf(bytes.toOpenArray(blockPos, blockPos + blkSize - 1)))
-          blockPos += blkSize
-          headerEnd =
-            if fmt == gfBcf: findBcfHeaderEnd(decompAccum)
-            else:             findVcfHeaderEnd(decompAccum)
-        if headerEnd < 0: headerEnd = decompAccum.len
-        let tail = decompAccum[headerEnd ..< decompAccum.len]
-        if tail.len > 0:
-          let chunk =
-            if cfg.compression == gcBgzf: compressToBgzfMulti(tail)
-            else: tail
-          discard outFile.writeBytes(chunk, 0, chunk.len)
-        # Stream remaining data blocks.
-        while blockPos < bytes.len:
-          let blkSize = bgzfBlockSize(bytes.toOpenArray(blockPos, bytes.high))
-          if blkSize <= 0: break
-          if cfg.compression == gcBgzf:
-            discard outFile.writeBytes(bytes, blockPos, blkSize)
+      # General path: decompress all, strip, write.
+      let data: seq[byte] =
+        if isBgzf: decompressAllBgzfBlocks(bytes)
+        else: bytes
+      let stripped: seq[byte] =
+        case fmt
+        of gfBcf: stripBcfHeader(data)
+        of gfVcf: stripLinesByPattern(data, "#")
+        of gfText:
+          if cfg.headerPattern.isSome:
+            stripLinesByPattern(data, cfg.headerPattern.get)
+          elif cfg.headerN.isSome:
+            stripFirstNLines(data, cfg.headerN.get)
           else:
-            let d = decompressBgzf(bytes.toOpenArray(blockPos, blockPos + blkSize - 1))
-            discard outFile.writeBytes(d, 0, d.len)
-          blockPos += blkSize
-      else:
-        # General path: decompress all, strip, write.
-        let data: seq[byte] =
-          if gStreamIsBgzf: decompressAllBgzfBlocks(bytes)
-          else: bytes
-        let stripped: seq[byte] =
-          case fmt
-          of gfBcf: stripBcfHeader(data)
-          of gfVcf: stripLinesByPattern(data, "#")
-          of gfText:
-            if cfg.headerPattern.isSome:
-              stripLinesByPattern(data, cfg.headerPattern.get)
-            elif cfg.headerN.isSome:
-              stripFirstNLines(data, cfg.headerN.get)
-            else:
-              data
-        let toWrite: seq[byte] =
-          if cfg.compression == gcBgzf: compressToBgzfMulti(stripped)
-          else: stripped
-        discard outFile.writeBytes(toWrite, 0, toWrite.len)
+            data
+      let toWrite: seq[byte] =
+        if cfg.compression == gcBgzf: compressToBgzfMulti(stripped)
+        else: stripped
+      discard outFile.writeBytes(toWrite, 0, toWrite.len)
+
   if cfg.compression == gcBgzf:
     discard outFile.writeBytes(BGZF_EOF, 0, BGZF_EOF.len)
-  outFile.close()
+  if not cfg.toStdout: outFile.close()
