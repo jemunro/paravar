@@ -365,81 +365,63 @@ proc isValidBcfBoundary(bcfPath: string; start: int64; length: int64): bool =
   result = valid
 
 proc optimiseBoundaries*(vcfPath: string; startsIn: seq[int64]; nShards: int;
-                          nThreads: int = 1; maxIt: int = 1000;
+                          nThreads: int = 1;
                           format: FileFormat = Vcf): (seq[int], seq[int64], seq[int64]) =
   ## Find shard boundary block indices that produce roughly equal-size parts.
-  ## Mirrors Python's optimise_boundaries:
+  ## Single-pass algorithm:
   ##   1. Compute initial partition from coarse block starts.
-  ##   2. Scan candidate boundary blocks for finer sub-blocks (parallel when nThreads > 1).
-  ##   3. Validate boundaries in parallel; exclude invalid ones and retry.
+  ##   2. Scan each boundary block range for finer BGZF sub-blocks (one pass).
+  ##   3. Repartition once with the enriched block list.
+  ##   4. Validate; fix any invalid boundary by finding the nearest valid neighbour.
   let fileSize = getFileSize(vcfPath)
-  var starts   = startsIn
-  var excluded: seq[int64]
-  var scanned:  seq[int64]
-  var lengths   = getLengths(starts, fileSize)
-  var bounds    = partitionBoundaries(lengths, nShards)
-  info(&"optimise: {starts.len} coarse blocks, initial boundary indices: {bounds}")
-  info(&"optimise: initial boundary offsets: {bounds.mapIt(starts[it])}")
-  for iter in 0 ..< maxIt:
-    # Scan boundary blocks for finer-grained BGZF sub-blocks.
-    var newStarts: seq[int64]
-    if nThreads > 1:
-      var scanFVs: seq[FlowVar[seq[int64]]]
-      for bi in bounds:
-        let s = starts[bi]; let l = lengths[bi]
-        if s notin scanned:
-          scanned.add(s)
-          scanFVs.add(spawn scanBgzfBlockStarts(vcfPath, s, s + l))
-      for fv in scanFVs:
-        for off in ^fv:
-          if off notin newStarts: newStarts.add(off)
-    else:
-      for bi in bounds:
-        let s = starts[bi]; let l = lengths[bi]
-        if s notin scanned:
-          scanned.add(s)
-          for off in scanBgzfBlockStarts(vcfPath, s, s + l):
-            if off notin newStarts: newStarts.add(off)
-    # Merge new sub-block starts, remove excluded.
-    var merged = starts & newStarts
-    merged.sort()
-    merged = merged.deduplicate(isSorted = true)
-    merged = merged.filterIt(it notin excluded)
-    starts  = merged
-    lengths = getLengths(starts, fileSize)
-    bounds  = partitionBoundaries(lengths, nShards)
-    # Validate each boundary block (parallel when nThreads > 1).
-    var invalid: seq[int64]
-    if nThreads > 1:
-      var validFVs: seq[(int64, FlowVar[bool])]
-      for bi in bounds:
-        if format == Bcf:
-          validFVs.add((starts[bi],
-                        spawn isValidBcfBoundary(vcfPath, starts[bi], lengths[bi])))
-        else:
-          validFVs.add((starts[bi],
-                        spawn isValidBoundary(vcfPath, starts[bi], lengths[bi])))
-      for (off, fv) in validFVs:
-        if not ^fv: invalid.add(off)
-    else:
-      for bi in bounds:
-        let ok = if format == Bcf: isValidBcfBoundary(vcfPath, starts[bi], lengths[bi])
-                 else:             isValidBoundary(vcfPath, starts[bi], lengths[bi])
-        if not ok: invalid.add(starts[bi])
-    if newStarts.len > 0 or invalid.len > 0:
-      info(&"optimise: iter {iter+1}: +{newStarts.len} sub-blocks, " &
-           &"{merged.len} total starts, {invalid.len} invalid boundaries")
-    if invalid.len == 0:
-      info(&"optimise: converged after {iter+1} iteration(s)")
-      info(&"optimise: final boundary offsets: {bounds.mapIt(starts[it])}")
-      break
-    for off in invalid:
-      if off notin excluded: excluded.add(off)
-    if iter == maxIt - 1:
-      stderr.writeLine "error: could not find valid partition after " &
-        $maxIt & " iterations; try fewer shards"
-      quit(1)
-  result = (bounds, starts, lengths)
+  var lengths  = getLengths(startsIn, fileSize)
+  var bounds   = partitionBoundaries(lengths, nShards)
+  info(&"optimise: {startsIn.len} coarse blocks, initial boundary indices: {bounds}")
+
+  # Scan each boundary block range once for fine-grained sub-blocks.
+  var allStarts = startsIn
+  if nThreads > 1:
+    var scanFVs: seq[FlowVar[seq[int64]]]
+    for bi in bounds:
+      let s = startsIn[bi]; let l = lengths[bi]
+      scanFVs.add(spawn scanBgzfBlockStarts(vcfPath, s, s + l))
+    for fv in scanFVs:
+      for off in ^fv:
+        if off notin allStarts: allStarts.add(off)
+  else:
+    for bi in bounds:
+      let s = startsIn[bi]; let l = lengths[bi]
+      for off in scanBgzfBlockStarts(vcfPath, s, s + l):
+        if off notin allStarts: allStarts.add(off)
+
+  allStarts.sort()
+  allStarts = allStarts.deduplicate(isSorted = true)
+  lengths = getLengths(allStarts, fileSize)
+  bounds  = partitionBoundaries(lengths, nShards)
+  info(&"optimise: {allStarts.len} fine blocks after scan, " &
+       &"boundary offsets: {bounds.mapIt(allStarts[it])}")
+
+  # Validate boundaries; fix any invalid one by scanning neighbours.
+  for i in 0 ..< bounds.len:
+    let isValid = proc(bi: int): bool =
+      if format == Bcf: isValidBcfBoundary(vcfPath, allStarts[bi], lengths[bi])
+      else:             isValidBoundary(vcfPath, allStarts[bi], lengths[bi])
+    if not isValid(bounds[i]):
+      var fixed = false
+      for delta in 1 ..< allStarts.len:
+        for candidate in [bounds[i] + delta, bounds[i] - delta]:
+          if candidate >= 0 and candidate < allStarts.len and isValid(candidate):
+            bounds[i] = candidate
+            fixed = true
+            break
+        if fixed: break
+      if not fixed:
+        stderr.writeLine "error: could not find valid boundary near shard " &
+          $(i + 1) & "; try fewer shards"
+        quit(1)
+
+  info(&"optimise: done (single pass)")
+  result = (bounds, allStarts, lengths)
 
 # ---------------------------------------------------------------------------
 # Phase 4 — shard writing helpers
