@@ -6,7 +6,7 @@
 ##   3. Optimise shard boundaries using weighted bisection + block validation.
 ##   4. Write shards: header + raw middle blocks + recompressed boundary blocks + EOF.
 
-import std/[algorithm, cpuinfo, os, posix, sequtils, strformat, strutils]
+import std/[algorithm, cpuinfo, os, posix, sequtils, sets, strformat, strutils]
 {.warning[Deprecated]: off.}
 import std/threadpool
 {.warning[Deprecated]: on.}
@@ -380,6 +380,7 @@ proc optimiseBoundaries*(vcfPath: string; startsIn: seq[int64]; nShards: int;
 
   # Scan each boundary block range once for fine-grained sub-blocks.
   var allStarts = startsIn
+  var seen = allStarts.toHashSet   # O(1) duplicate check replaces O(n) `notin seq`
   if nThreads > 1:
     var scanFVs: seq[FlowVar[seq[int64]]]
     for bi in bounds:
@@ -387,12 +388,16 @@ proc optimiseBoundaries*(vcfPath: string; startsIn: seq[int64]; nShards: int;
       scanFVs.add(spawn scanBgzfBlockStarts(vcfPath, s, s + l))
     for fv in scanFVs:
       for off in ^fv:
-        if off notin allStarts: allStarts.add(off)
+        if off notin seen:
+          seen.incl(off)
+          allStarts.add(off)
   else:
     for bi in bounds:
       let s = startsIn[bi]; let l = lengths[bi]
       for off in scanBgzfBlockStarts(vcfPath, s, s + l):
-        if off notin allStarts: allStarts.add(off)
+        if off notin seen:
+          seen.incl(off)
+          allStarts.add(off)
 
   allStarts.sort()
   allStarts = allStarts.deduplicate(isSorted = true)

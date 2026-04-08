@@ -60,7 +60,7 @@ proc leU16(buf: openArray[byte]; pos: int): uint16 {.inline.} =
   ## Read a little-endian uint16 from buf at pos.
   buf[pos].uint16 or (buf[pos + 1].uint16 shl 8)
 
-proc leU32(buf: openArray[byte]; pos: int): uint32 {.inline.} =
+proc leU32*(buf: openArray[byte]; pos: int): uint32 {.inline.} =
   ## Read a little-endian uint32 from buf at pos.
   buf[pos].uint32 or (buf[pos+1].uint32 shl 8) or
   (buf[pos+2].uint32 shl 16) or (buf[pos+3].uint32 shl 24)

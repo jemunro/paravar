@@ -176,10 +176,12 @@ proc buildShellCmdForShard*(stages: seq[seq[string]]; shardIdx: int; nShards: in
 # ---------------------------------------------------------------------------
 
 type InFlight = object
-  ## Tracks one active shard: child process + writer thread.
+  ## Tracks one active shard: child process + writer thread + optional interceptor/feeder.
   pid:      Pid
   writeFv:  FlowVar[int]
+  extraFv:  FlowVar[int]  ## interceptor or feeder thread; nil if unused
   shardIdx: int
+  tmpPath:  string         ## non-empty only for gather shards 1..N
 
 proc forkExecSh(pipeReadFd: cint; pipeWriteFd: cint; stdoutFd: cint;
                 shellCmd: string; shardIdx: int): Pid =
@@ -211,7 +213,7 @@ proc killAll(running: seq[InFlight]) =
     discard posix.kill(s.pid, SIGTERM)
 
 proc waitOne(running: var seq[InFlight]; failed: var bool) =
-  ## Wait for any one child to finish; record failure if exit code != 0.
+  ## Wait for any one child to finish; sync writer and optional extra thread; record failure.
   var status: cint
   let donePid = posix.waitpid(-1, status, 0)
   let code    = int((status shr 8) and 0xff)
@@ -219,7 +221,10 @@ proc waitOne(running: var seq[InFlight]; failed: var bool) =
   while j < running.len:
     if running[j].pid == donePid:
       discard ^running[j].writeFv
-      if code != 0:
+      var ok = (code == 0)
+      if running[j].extraFv != nil:
+        ok = ok and ((^running[j].extraFv) == 0)
+      if not ok:
         stderr.writeLine &"shard {running[j].shardIdx + 1}: pipeline exited with code {code}"
         failed = true
       running.del(j)
@@ -256,6 +261,7 @@ proc runShards*(vcfPath: string; nShards: int; outputTemplate: string;
     if posix.pipe(pipeFds) != 0:
       stderr.writeLine &"error: pipe() failed for shard {i + 1}"
       quit(1)
+    discard posix.fcntl(pipeFds[1], F_SETFD, FD_CLOEXEC)
     var outFileFd: cint
     if toolManaged:
       outFileFd = posix.open("/dev/null".cstring, O_WRONLY)
@@ -294,35 +300,6 @@ proc runShards*(vcfPath: string; nShards: int; outputTemplate: string;
 # G6 — gather path: interceptor threads + concatenation
 # ---------------------------------------------------------------------------
 
-type InFlightGather = object
-  ## Tracks one gather shard: shell process + writer thread + interceptor thread.
-  pid:         Pid
-  writeFv:     FlowVar[int]
-  interceptFv: FlowVar[int]
-  shardIdx:    int
-  tmpPath:     string
-
-proc killAllGather(running: seq[InFlightGather]) =
-  for s in running:
-    discard posix.kill(s.pid, SIGTERM)
-
-proc waitOneGather(running: var seq[InFlightGather]; failed: var bool) =
-  ## Wait for any one shell child to exit; sync its writer and interceptor; record failure.
-  var status: cint
-  let donePid = posix.waitpid(-1, status, 0)
-  let code    = int((status shr 8) and 0xff)
-  var j = 0
-  while j < running.len:
-    if running[j].pid == donePid:
-      discard ^running[j].writeFv
-      let interceptCode = ^running[j].interceptFv
-      if code != 0 or interceptCode != 0:
-        stderr.writeLine &"shard {running[j].shardIdx + 1}: pipeline exited with code {code}"
-        failed = true
-      running.del(j)
-      return
-    j += 1
-
 proc runShardsGather*(vcfPath: string; nShards: int; outputTemplate: string;
                       nThreads: int; forceScan: bool;
                       stages: seq[seq[string]]; noKill: bool; cfg: GatherConfig;
@@ -338,12 +315,12 @@ proc runShardsGather*(vcfPath: string; nShards: int; outputTemplate: string;
   let tasks = computeShards(vcfPath, nShards, actualThreads, forceScan, fmt)
   createDir(cfg.tmpDir)
   var anyFailed = false
-  var inFlight:    seq[InFlightGather]
+  var inFlight:    seq[InFlight]
   var allTmpPaths: seq[string]
   for i in 0 ..< nShards:
     if anyFailed and not noKill: break
     while inFlight.len >= nShards:
-      waitOneGather(inFlight, anyFailed)
+      waitOne(inFlight, anyFailed)
       if anyFailed and not noKill: break
     if anyFailed and not noKill: break
     let tmpPath =
@@ -360,6 +337,9 @@ proc runShardsGather*(vcfPath: string; nShards: int; outputTemplate: string;
     if posix.pipe(stdinPipe) != 0 or posix.pipe(stdoutPipe) != 0:
       stderr.writeLine &"error: pipe() failed for shard {i + 1}"
       quit(1)
+    # Prevent write-end and read-end from being inherited by future fork children.
+    discard posix.fcntl(stdinPipe[1],  F_SETFD, FD_CLOEXEC)
+    discard posix.fcntl(stdoutPipe[0], F_SETFD, FD_CLOEXEC)
     let shardCmd = buildShellCmdForShard(stages, i, nShards)
     let pid = forkExecSh(stdinPipe[0], stdinPipe[1], stdoutPipe[1], shardCmd, i)
     # Parent closes fds that now belong to the child.
@@ -373,13 +353,13 @@ proc runShardsGather*(vcfPath: string; nShards: int; outputTemplate: string;
     # Spawn interceptor (reads shell stdout from stdoutPipe[0], writes to tmpPath).
     let interceptFd = stdoutPipe[0]
     var cfgCopy = cfg
-    let interceptFv = spawn runInterceptor(cfgCopy, i, interceptFd, tmpPath)
-    inFlight.add(InFlightGather(pid: pid, writeFv: writeFv, interceptFv: interceptFv,
-                                shardIdx: i, tmpPath: tmpPath))
+    let extraFv = spawn runInterceptor(cfgCopy, i, interceptFd, tmpPath)
+    inFlight.add(InFlight(pid: pid, writeFv: writeFv, extraFv: extraFv,
+                          shardIdx: i, tmpPath: tmpPath))
   if anyFailed and not noKill:
-    killAllGather(inFlight)
+    killAll(inFlight)
   while inFlight.len > 0:
-    waitOneGather(inFlight, anyFailed)
+    waitOne(inFlight, anyFailed)
   if anyFailed:
     cleanupTempDir(cfg.tmpDir, allTmpPaths, false)
     quit(1)
@@ -438,38 +418,19 @@ proc doCollectInterceptor*(shardIdx: int; inputFd: cint; outFd: cint): int {.gcs
   var rawAccum: seq[byte]   ## raw bytes accumulated for BGZF block reassembly
   var bgzfPos = 0           ## offset into rawAccum of next unprocessed BGZF block
 
-  # Decompress any complete BGZF blocks from rawAccum into pending.
-  template flushBgzfBlocks() =
-    while bgzfPos + 18 <= rawAccum.len:
-      let blkSize = bgzfBlockSize(rawAccum.toOpenArray(bgzfPos, rawAccum.high))
-      if blkSize <= 0 or bgzfPos + blkSize > rawAccum.len: break
-      pending.add(
-        decompressBgzf(rawAccum.toOpenArray(bgzfPos, bgzfPos + blkSize - 1)))
-      bgzfPos += blkSize
-
-  # Append n bytes from raw[] to the decompressed pending buffer.
-  template appendRead(n: int) =
-    if isBgzf:
-      rawAccum.add(raw[0 ..< n])
-      flushBgzfBlocks()
-    else:
-      let base = pending.len
-      pending.setLen(base + n)
-      copyMem(addr pending[base], addr raw[0], n)
-
   # ── Format detection ───────────────────────────────────────────────────
   if shardIdx == 0:
     let n = posix.read(inputFd, cast[pointer](addr raw[0]), ReadSize)
     if n <= 0:
       discard posix.close(inputFd)
-      gFormatDetected = true   # unblock shards 1..N even on empty shard 0
+      gChromLine.ready = true   # unblock shards 1..N even on empty shard 0
       return 0
     let (detFmt, detBgzf) = sniffStreamFormat(raw[0 ..< n])
     fmt    = detFmt
     isBgzf = detBgzf
-    appendRead(n)
+    appendReadToAccum(raw, n.int, isBgzf, rawAccum, bgzfPos, pending)
   else:
-    while not gFormatDetected: sleep(1)
+    while not gChromLine.ready: sleep(1)
     fmt    = gDetectedFormat
     isBgzf = gStreamIsBgzf
 
@@ -485,7 +446,7 @@ proc doCollectInterceptor*(shardIdx: int; inputFd: cint; outFd: cint): int {.gcs
     if hEnd >= 0: break
     let n = posix.read(inputFd, cast[pointer](addr raw[0]), ReadSize)
     if n <= 0: break
-    appendRead(n)
+    appendReadToAccum(raw, n.int, isBgzf, rawAccum, bgzfPos, pending)
   if hEnd < 0: hEnd = pending.len
 
   if shardIdx == 0:
@@ -493,8 +454,8 @@ proc doCollectInterceptor*(shardIdx: int; inputFd: cint; outFd: cint): int {.gcs
     writeUnderCollectLock(outFd, pending[0 ..< hEnd])
     gDetectedFormat = fmt
     gStreamIsBgzf   = isBgzf
-    gChromLineLen   = 0
-    gFormatDetected = true
+    gChromLine.len   = 0
+    gChromLine.ready = true
 
   # Advance past header.
   pending = if hEnd < pending.len: pending[hEnd ..< pending.len] else: @[]
@@ -511,7 +472,7 @@ proc doCollectInterceptor*(shardIdx: int; inputFd: cint; outFd: cint): int {.gcs
       pending = if eIdx < pending.len: pending[eIdx ..< pending.len] else: @[]
     let n = posix.read(inputFd, cast[pointer](addr raw[0]), ReadSize)
     if n <= 0: break
-    appendRead(n)
+    appendReadToAccum(raw, n.int, isBgzf, rawAccum, bgzfPos, pending)
 
   # Final flush of any trailing complete records.
   let eIdx =
@@ -523,31 +484,6 @@ proc doCollectInterceptor*(shardIdx: int; inputFd: cint; outFd: cint): int {.gcs
 
   discard posix.close(inputFd)
   result = 0
-
-type InFlightCollect = object
-  pid:         Pid
-  writeFv:     FlowVar[int]
-  interceptFv: FlowVar[int]
-  shardIdx:    int
-
-proc killAllCollect(running: seq[InFlightCollect]) =
-  for s in running: discard posix.kill(s.pid, SIGTERM)
-
-proc waitOneCollect(running: var seq[InFlightCollect]; failed: var bool) =
-  var status: cint
-  let donePid = posix.waitpid(-1, status, 0)
-  let code    = int((status shr 8) and 0xff)
-  var j = 0
-  while j < running.len:
-    if running[j].pid == donePid:
-      discard ^running[j].writeFv
-      let interceptCode = ^running[j].interceptFv
-      if code != 0 or interceptCode != 0:
-        stderr.writeLine &"shard {running[j].shardIdx + 1}: pipeline exited with code {code}"
-        failed = true
-      running.del(j)
-      return
-    j += 1
 
 proc runShardsCollect*(vcfPath: string; nShards: int; outputPath: string;
                        nThreads: int; forceScan: bool;
@@ -563,10 +499,10 @@ proc runShardsCollect*(vcfPath: string; nShards: int; outputPath: string;
   let tasks = computeShards(vcfPath, nShards, actualThreads, forceScan, fmt)
 
   # Reset format-detection globals (shared with gather).
-  gFormatDetected = false
+  gChromLine.ready = false
   gDetectedFormat = gfText
   gStreamIsBgzf   = false
-  gChromLineLen   = 0
+  gChromLine.len   = 0
 
   initLock(gCollectLock)
 
@@ -582,11 +518,11 @@ proc runShardsCollect*(vcfPath: string; nShards: int; outputPath: string;
       fd
 
   var anyFailed = false
-  var inFlight: seq[InFlightCollect]
+  var inFlight: seq[InFlight]
   for i in 0 ..< nShards:
     if anyFailed and not noKill: break
     while inFlight.len >= nShards:
-      waitOneCollect(inFlight, anyFailed)
+      waitOne(inFlight, anyFailed)
       if anyFailed and not noKill: break
     if anyFailed and not noKill: break
     # stdin pipe: shard writer → shell stdin
@@ -596,6 +532,9 @@ proc runShardsCollect*(vcfPath: string; nShards: int; outputPath: string;
     if posix.pipe(stdinPipe) != 0 or posix.pipe(stdoutPipe) != 0:
       stderr.writeLine &"error: pipe() failed for shard {i + 1}"
       quit(1)
+    # Prevent write-end and read-end from being inherited by future fork children.
+    discard posix.fcntl(stdinPipe[1],  F_SETFD, FD_CLOEXEC)
+    discard posix.fcntl(stdoutPipe[0], F_SETFD, FD_CLOEXEC)
     let shardCmd = buildShellCmdForShard(stages, i, nShards)
     let pid = forkExecSh(stdinPipe[0], stdinPipe[1], stdoutPipe[1], shardCmd, i)
     discard posix.close(stdinPipe[0])
@@ -603,15 +542,14 @@ proc runShardsCollect*(vcfPath: string; nShards: int; outputPath: string;
     var task = tasks[i]
     task.outFd = stdinPipe[1]
     task.decompress = decompress
-    let writeFv     = spawn doWriteShard(task)
-    let interceptFv = spawn doCollectInterceptor(i, stdoutPipe[0], outFd)
-    inFlight.add(InFlightCollect(pid: pid, writeFv: writeFv,
-                                 interceptFv: interceptFv, shardIdx: i))
+    let writeFv = spawn doWriteShard(task)
+    let extraFv = spawn doCollectInterceptor(i, stdoutPipe[0], outFd)
+    inFlight.add(InFlight(pid: pid, writeFv: writeFv, extraFv: extraFv, shardIdx: i))
 
   if anyFailed and not noKill:
-    killAllCollect(inFlight)
+    killAll(inFlight)
   while inFlight.len > 0:
-    waitOneCollect(inFlight, anyFailed)
+    waitOne(inFlight, anyFailed)
 
   deinitLock(gCollectLock)
   if not toStdout: discard posix.close(outFd)
@@ -621,12 +559,10 @@ proc runShardsCollect*(vcfPath: string; nShards: int; outputPath: string;
 # M5 — +merge+ k-way merge output (sequential scatter)
 # ---------------------------------------------------------------------------
 
-var gMergeBgzfWarned {.global.}: bool = false
-
 proc doMergeFeeder(shardIdx: int; srcFd: cint; relayWriteFd: cint): int {.gcsafe.} =
   ## Read from srcFd (subprocess stdout), strip VCF/BCF header, relay
   ## post-header bytes (decompressed if BGZF) to relayWriteFd.
-  ## Shard 0: sets gMergeFormat and gMergeHeaderAvail when header is found.
+  ## Shard 0: sets gMergeFormat and gMergeHeader.ready when header is found.
   ## Closes relayWriteFd and srcFd before returning.
   const ReadSize = 65536
   var raw      = newSeq[byte](ReadSize)
@@ -636,29 +572,13 @@ proc doMergeFeeder(shardIdx: int; srcFd: cint; relayWriteFd: cint): int {.gcsafe
   var rawAccum: seq[byte]
   var bgzfPos  = 0
 
-  template flushBgzf() =
-    while bgzfPos + 18 <= rawAccum.len:
-      let blkSize = bgzfBlockSize(rawAccum.toOpenArray(bgzfPos, rawAccum.high))
-      if blkSize <= 0 or bgzfPos + blkSize > rawAccum.len: break
-      pending.add(decompressBgzf(rawAccum.toOpenArray(bgzfPos, bgzfPos + blkSize - 1)))
-      bgzfPos += blkSize
-
-  template appendRead(n: int) =
-    if isBgzf:
-      rawAccum.add(raw[0 ..< n])
-      flushBgzf()
-    else:
-      let base = pending.len
-      pending.setLen(base + n)
-      copyMem(addr pending[base], addr raw[0], n)
-
   # --- First read: format + BGZF detection ---
   let n0 = posix.read(srcFd, cast[pointer](addr raw[0]), ReadSize)
   if n0 <= 0:
     discard posix.close(relayWriteFd)
     if shardIdx == 0:
       gMergeFormat      = gfVcf
-      gMergeHeaderAvail = true
+      gMergeHeader.ready = true
     discard posix.close(srcFd)
     return 0
 
@@ -668,7 +588,7 @@ proc doMergeFeeder(shardIdx: int; srcFd: cint; relayWriteFd: cint): int {.gcsafe
   if isBgzf and not gMergeBgzfWarned:
     gMergeBgzfWarned = true
     stderr.writeLine "warning: +merge+ works best with uncompressed output (-Ou/-Ov) from the last pipeline stage"
-  appendRead(n0.int)
+  appendReadToAccum(raw, n0.int, isBgzf, rawAccum, bgzfPos, pending)
 
   # --- Header accumulation ---
   var hEnd = -1
@@ -681,17 +601,17 @@ proc doMergeFeeder(shardIdx: int; srcFd: cint; relayWriteFd: cint): int {.gcsafe
     if hEnd >= 0: break
     let n = posix.read(srcFd, cast[pointer](addr raw[0]), ReadSize)
     if n <= 0: break
-    appendRead(n.int)
+    appendReadToAccum(raw, n.int, isBgzf, rawAccum, bgzfPos, pending)
   if hEnd < 0: hEnd = pending.len
 
   # --- Signal shard 0 format availability ---
   if shardIdx == 0:
-    let sz = min(hEnd, gMergeHeaderCap)
+    let sz = min(hEnd, gMergeHeader.buf.len)
     if sz > 0:
-      copyMem(addr gMergeHeaderBuf[0], unsafeAddr pending[0], sz)
-    gMergeHeaderLen   = sz.int32
+      copyMem(addr gMergeHeader.buf[0], unsafeAddr pending[0], sz)
+    gMergeHeader.len   = sz.int32
     gMergeFormat      = fmt
-    gMergeHeaderAvail = true
+    gMergeHeader.ready = true
 
   # --- Relay post-header records to relayWriteFd ---
   template relayBytes(data: openArray[byte]) =
@@ -716,7 +636,7 @@ proc doMergeFeeder(shardIdx: int; srcFd: cint; relayWriteFd: cint): int {.gcsafe
     if n <= 0: break
     if isBgzf:
       rawAccum.add(raw[0 ..< n])
-      flushBgzf()
+      flushBgzfAccum(rawAccum, bgzfPos, pending)
       if pending.len > 0:
         relayBytes(pending.toOpenArray(0, pending.high))
         pending = @[]
@@ -726,28 +646,6 @@ proc doMergeFeeder(shardIdx: int; srcFd: cint; relayWriteFd: cint): int {.gcsafe
   discard posix.close(relayWriteFd)
   discard posix.close(srcFd)
   result = 0
-
-type InFlightMerge = object
-  pid:      Pid
-  writeFv:  FlowVar[int]
-  feederFv: FlowVar[int]
-  shardIdx: int
-
-proc waitOneMerge(running: var seq[InFlightMerge]; failed: var bool) =
-  var status: cint
-  let donePid = posix.waitpid(-1, status, 0)
-  let code    = int((status shr 8) and 0xff)
-  var j = 0
-  while j < running.len:
-    if running[j].pid == donePid:
-      discard ^running[j].writeFv
-      discard ^running[j].feederFv
-      if code != 0:
-        stderr.writeLine &"shard {running[j].shardIdx + 1}: pipeline exited with code {code}"
-        failed = true
-      running.del(j)
-      return
-    j += 1
 
 proc runShardsMerge*(vcfPath: string; nShards: int; outputPath: string;
                      nThreads: int; forceScan: bool;
@@ -764,14 +662,14 @@ proc runShardsMerge*(vcfPath: string; nShards: int; outputPath: string;
   let tasks = computeShards(vcfPath, nShards, actualThreads, forceScan, fmt)
 
   # Reset merge globals.
-  gMergeHeaderAvail = false
-  gMergeHeaderLen   = 0
+  gMergeHeader.ready = false
+  gMergeHeader.len   = 0
   gMergeFormat      = if fmt == FileFormat.Bcf: gfBcf else: gfVcf
   gMergeBgzfWarned  = false
 
   stderr.writeLine "warning: +merge+ with sequential scatter may block on the slowest shard (expected until interleaved scatter is implemented)"
 
-  var inFlight:    seq[InFlightMerge]
+  var inFlight:    seq[InFlight]
   var relayReadFds: seq[cint]
 
   for i in 0 ..< nShards:
@@ -784,26 +682,27 @@ proc runShardsMerge*(vcfPath: string; nShards: int; outputPath: string;
       quit(1)
     # Prevent inherited write-ends from causing deadlocks in future forks.
     # Child j+1 must not hold stdinPipe[1][j] or relayPipe[1][j] after exec.
-    discard posix.fcntl(stdinPipe[1], F_SETFD, FD_CLOEXEC)
-    discard posix.fcntl(relayPipe[1], F_SETFD, FD_CLOEXEC)
+    # stdoutPipe[0] is read by the feeder thread; also mark CLOEXEC for hygiene.
+    discard posix.fcntl(stdinPipe[1],  F_SETFD, FD_CLOEXEC)
+    discard posix.fcntl(relayPipe[1],  F_SETFD, FD_CLOEXEC)
+    discard posix.fcntl(stdoutPipe[0], F_SETFD, FD_CLOEXEC)
     let shardCmd = buildShellCmdForShard(stages, i, nShards)
     let pid = forkExecSh(stdinPipe[0], stdinPipe[1], stdoutPipe[1], shardCmd, i)
     discard posix.close(stdinPipe[0])
     discard posix.close(stdoutPipe[1])
     var task = tasks[i]
-    task.outFd     = stdinPipe[1]
+    task.outFd      = stdinPipe[1]
     task.decompress = decompress
-    let writeFv  = spawn doWriteShard(task)
-    let feederFv = spawn doMergeFeeder(i, stdoutPipe[0], relayPipe[1])
+    let writeFv = spawn doWriteShard(task)
+    let extraFv = spawn doMergeFeeder(i, stdoutPipe[0], relayPipe[1])
     relayReadFds.add(relayPipe[0])
-    inFlight.add(InFlightMerge(pid: pid, writeFv: writeFv,
-                               feederFv: feederFv, shardIdx: i))
+    inFlight.add(InFlight(pid: pid, writeFv: writeFv, extraFv: extraFv, shardIdx: i))
 
   # Wait for shard 0 feeder to detect format and capture header.
-  while not gMergeHeaderAvail: sleep(1)
+  while not gMergeHeader.ready: sleep(1)
 
   # Build contig table from subprocess's output header (works for VCF and BCF pipelines).
-  let hdrSlice = @(gMergeHeaderBuf[0 ..< gMergeHeaderLen])
+  let hdrSlice = @(gMergeHeader.buf[0 ..< gMergeHeader.len])
   let contigTable = extractContigTable(hdrSlice)
 
   # Open output fd.
@@ -819,9 +718,9 @@ proc runShardsMerge*(vcfPath: string; nShards: int; outputPath: string;
 
   # Write the subprocess header to outFd (matches pipeline output format exactly).
   var hw = 0
-  while hw < gMergeHeaderLen.int:
-    let n = posix.write(outFd, cast[pointer](addr gMergeHeaderBuf[hw]),
-                        gMergeHeaderLen.int - hw)
+  while hw < gMergeHeader.len.int:
+    let n = posix.write(outFd, cast[pointer](addr gMergeHeader.buf[hw]),
+                        gMergeHeader.len.int - hw)
     if n <= 0: break
     hw += n
 
@@ -833,7 +732,14 @@ proc runShardsMerge*(vcfPath: string; nShards: int; outputPath: string;
   if not toStdout: discard posix.close(outFd)
 
   # Reap all subprocesses (all have exited since relay pipes are at EOF).
+  # kWayMerge already drained relay pipes so subprocesses are naturally finished;
+  # kill-all is a safety net for the rare case a subprocess hangs on exit.
   var anyFailed = false
   while inFlight.len > 0:
-    waitOneMerge(inFlight, anyFailed)
+    waitOne(inFlight, anyFailed)
+    if anyFailed and not noKill:
+      killAll(inFlight)
+      break
+  while inFlight.len > 0:
+    waitOne(inFlight, anyFailed)
   if anyFailed: quit(1)

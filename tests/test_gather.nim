@@ -459,7 +459,7 @@ block testRunInterceptorBcfStrip:
   # Set global state: uncompressed BCF detected by shard 0.
   gDetectedFormat = gfBcf
   gStreamIsBgzf   = false
-  gFormatDetected = true
+  gChromLine.ready = true
 
   var fds: array[2, cint]
   doAssert posix.pipe(fds) == 0
@@ -492,12 +492,12 @@ block testRunInterceptorVcfStrip:
 
   gDetectedFormat = gfVcf
   gStreamIsBgzf   = false
-  # Set gChromLineBuf to match the #CHROM line in vcfData above.
+  # Set gChromLine.buf to match the #CHROM line in vcfData above.
   let chromStr = "#CHROM\tPOS"
-  gChromLineLen = chromStr.len.int32
+  gChromLine.len = chromStr.len.int32
   for k in 0 ..< chromStr.len:
-    gChromLineBuf[k] = byte(chromStr[k])
-  gFormatDetected = true
+    gChromLine.buf[k] = byte(chromStr[k])
+  gChromLine.ready = true
 
   var fds: array[2, cint]
   doAssert posix.pipe(fds) == 0
@@ -531,7 +531,7 @@ block testRunInterceptorHeaderN:
 
   gDetectedFormat = gfText
   gStreamIsBgzf   = false
-  gFormatDetected = true
+  gChromLine.ready = true
 
   var fds: array[2, cint]
   doAssert posix.pipe(fds) == 0
@@ -566,7 +566,7 @@ block testRunInterceptorNoStrip:
 
   gDetectedFormat = gfText
   gStreamIsBgzf   = false
-  gFormatDetected = true
+  gChromLine.ready = true
 
   var fds: array[2, cint]
   doAssert posix.pipe(fds) == 0
@@ -685,10 +685,10 @@ block testShardStripAndRecompress:
   gDetectedFormat = gfVcf
   gStreamIsBgzf   = false
   let chromStr4 = "#CHROM\tPOS"
-  gChromLineLen = chromStr4.len.int32
+  gChromLine.len = chromStr4.len.int32
   for k in 0 ..< chromStr4.len:
-    gChromLineBuf[k] = byte(chromStr4[k])
-  gFormatDetected = true
+    gChromLine.buf[k] = byte(chromStr4[k])
+  gChromLine.ready = true
 
   var fds: array[2, cint]
   doAssert posix.pipe(fds) == 0
@@ -725,10 +725,10 @@ block testShardBgzfInputStripAndRecompress:
   gDetectedFormat = gfVcf
   gStreamIsBgzf   = true
   let chromStr5 = "#CHROM\tPOS"
-  gChromLineLen = chromStr5.len.int32
+  gChromLine.len = chromStr5.len.int32
   for k in 0 ..< chromStr5.len:
-    gChromLineBuf[k] = byte(chromStr5[k])
-  gFormatDetected = true
+    gChromLine.buf[k] = byte(chromStr5[k])
+  gChromLine.ready = true
 
   var fds: array[2, cint]
   doAssert posix.pipe(fds) == 0
