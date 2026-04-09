@@ -2,7 +2,10 @@
 ## and shard writing (Step 5).
 ## Run from project root: nim c -r tests/test_scatter.nim
 
-import std/[algorithm, os, strformat, strutils]
+import std/[algorithm, math, os, osproc, posix, strformat, strutils, tempfiles]
+{.warning[Deprecated]: off.}
+import std/threadpool
+{.warning[Deprecated]: on.}
 import "../src/vcfparty/vcf_utils"
 import "../src/vcfparty/scatter"
 
@@ -256,8 +259,7 @@ block testScanAllBlockStarts:
 # SC12 — testScatter4ShardsTbi: 4 shards (TBI); BGZF structure, completeness, order, size balance
 # ---------------------------------------------------------------------------
 block testScatter4ShardsTbi:
-  let tmpDir = getTempDir() / "vcfparty_scatter_tbi_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let tmpl = tmpDir / "shard.{}.vcf.gz"
   scatter(SmallVcf, 4, tmpl)
   checkShards(SmallVcf, tmpl, 4)
@@ -278,8 +280,7 @@ block testScatter4ShardsTbi:
 # ---------------------------------------------------------------------------
 block testScatterForceScan:
   ## scatter with forceScan=true on a fully indexed file — index is ignored.
-  let tmpDir = getTempDir() / "vcfparty_scatter_forcescan_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let tmpl = tmpDir / "shard.{}.vcf.gz"
   scatter(SmallVcf, 4, tmpl, 1, forceScan = true)
   checkShards(SmallVcf, tmpl, 4)
@@ -291,8 +292,7 @@ block testScatterForceScan:
 # ---------------------------------------------------------------------------
 block testScatter4ShardsCsi:
   doAssert fileExists(CsiVcf & ".csi"), "CSI fixture missing — run generate_fixtures.sh"
-  let tmpDir = getTempDir() / "vcfparty_scatter_csi_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let tmpl = tmpDir / "shard.{}.vcf.gz"
   scatter(CsiVcf, 4, tmpl)
   checkShards(CsiVcf, tmpl, 4)
@@ -457,8 +457,7 @@ proc checkBcfShards(bcfPath: string; tmpl: string; n: int) =
 # ---------------------------------------------------------------------------
 block testBcfScatter4Shards:
   doAssert fileExists(SmallBcf), &"BCF fixture missing: {SmallBcf}"
-  let tmpDir = getTempDir() / "vcfparty_bcf_4shard_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let tmpl = tmpDir / "shard.{}.bcf"
   scatter(SmallBcf, 4, tmpl, format = ffBcf)
   checkBcfShards(SmallBcf, tmpl, 4)
@@ -477,11 +476,196 @@ block testBcfScatter4Shards:
 # ---------------------------------------------------------------------------
 block testBcfScatterLargeHeader:
   doAssert fileExists(KgBcf), &"large BCF fixture missing: {KgBcf}"
-  let tmpDir = getTempDir() / "vcfparty_bcf_kg_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let tmpl = tmpDir / "shard.{}.bcf"
   scatter(KgBcf, 4, tmpl, format = ffBcf)
   checkBcfShards(KgBcf, tmpl, 4)
   echo "PASS SC7.2 BCF scatter: chr22_1kg.bcf large header, 4 shards"
   removeDir(tmpDir)
+
+# ===========================================================================
+# SC8 — interleavedBlockAssignment: round-robin chunk assignment
+# ===========================================================================
+
+proc allBlocksCovered(assignment: seq[seq[Slice[int]]]; nBlocks: int): bool =
+  ## Verify every block index 0..<nBlocks appears exactly once across all shards.
+  var seen = newSeq[int](nBlocks)
+  for shardSlices in assignment:
+    for s in shardSlices:
+      for i in s:
+        if i < 0 or i >= nBlocks: return false
+        inc seen[i]
+  for c in seen:
+    if c != 1: return false
+  true
+
+# ---------------------------------------------------------------------------
+# SC8.1 — every block assigned exactly once
+# ---------------------------------------------------------------------------
+block testInterleavedCoverage:
+  let a = interleavedBlockAssignment(20, 4, 3)
+  doAssert a.len == 4, "SC8.1: expected 4 shards"
+  doAssert allBlocksCovered(a, 20), "SC8.1: not all blocks covered exactly once"
+  echo "PASS SC8.1 interleavedBlockAssignment: every block assigned exactly once"
+
+# ---------------------------------------------------------------------------
+# SC8.2 — round-robin order correct
+# ---------------------------------------------------------------------------
+block testInterleavedRoundRobin:
+  # 12 blocks, 3 shards, K=2 → chunks: [0..1]=s0, [2..3]=s1, [4..5]=s2,
+  #                                      [6..7]=s0, [8..9]=s1, [10..11]=s2
+  let a = interleavedBlockAssignment(12, 3, 2)
+  doAssert a[0] == @[0..1, 6..7],   "SC8.2: shard 0 wrong"
+  doAssert a[1] == @[2..3, 8..9],   "SC8.2: shard 1 wrong"
+  doAssert a[2] == @[4..5, 10..11], "SC8.2: shard 2 wrong"
+  echo "PASS SC8.2 interleavedBlockAssignment: round-robin order correct"
+
+# ---------------------------------------------------------------------------
+# SC8.3 — K=1 single-block chunks
+# ---------------------------------------------------------------------------
+block testInterleavedK1:
+  let a = interleavedBlockAssignment(5, 3, 1)
+  doAssert a[0] == @[0..0, 3..3], "SC8.3: shard 0 wrong"
+  doAssert a[1] == @[1..1, 4..4], "SC8.3: shard 1 wrong"
+  doAssert a[2] == @[2..2],       "SC8.3: shard 2 wrong"
+  doAssert allBlocksCovered(a, 5), "SC8.3: coverage check failed"
+  echo "PASS SC8.3 interleavedBlockAssignment: K=1 single-block chunks"
+
+# ---------------------------------------------------------------------------
+# SC8.4 — nBlocks < nShards (some shards empty)
+# ---------------------------------------------------------------------------
+block testInterleavedFewBlocks:
+  let a = interleavedBlockAssignment(2, 5, 1)
+  doAssert a[0] == @[0..0], "SC8.4: shard 0 wrong"
+  doAssert a[1] == @[1..1], "SC8.4: shard 1 wrong"
+  doAssert a[2].len == 0,   "SC8.4: shard 2 should be empty"
+  doAssert a[3].len == 0,   "SC8.4: shard 3 should be empty"
+  doAssert a[4].len == 0,   "SC8.4: shard 4 should be empty"
+  doAssert allBlocksCovered(a, 2), "SC8.4: coverage check failed"
+  echo "PASS SC8.4 interleavedBlockAssignment: nBlocks < nShards, some shards empty"
+
+# ---------------------------------------------------------------------------
+# SC8.5 — nBlocks not divisible by K (last chunk smaller)
+# ---------------------------------------------------------------------------
+block testInterleavedLastChunkSmaller:
+  # 10 blocks, 2 shards, K=3 → chunks: [0..2]=s0, [3..5]=s1, [6..8]=s0, [9..9]=s1
+  let a = interleavedBlockAssignment(10, 2, 3)
+  doAssert a[0] == @[0..2, 6..8], "SC8.5: shard 0 wrong"
+  doAssert a[1] == @[3..5, 9..9], "SC8.5: shard 1 wrong (last chunk should be 1 block)"
+  doAssert allBlocksCovered(a, 10), "SC8.5: coverage check failed"
+  echo "PASS SC8.5 interleavedBlockAssignment: last chunk smaller than K"
+
+# ===========================================================================
+# SC9 — writeInterleavedShard: inbox model integration tests
+# ===========================================================================
+
+proc countRecords(path: string): int =
+  let (o, _) = execCmdEx("bcftools view -HG " & path & " 2>/dev/null | wc -l")
+  o.strip.parseInt
+
+proc writeInterleavedShards(vcfPath: string; nShards, chunkSize: int;
+                             tmpDir: string; fmt: FileFormat): seq[string] =
+  ## Helper: run interleaved scatter into temp files, return shard paths.
+  let fileSize = getFileSize(vcfPath)
+  var headerBytes: seq[byte]
+  var starts: seq[int64]
+  var csiVoffs: seq[(int64, int)]
+
+  if fmt == ffBcf:
+    headerBytes = decompressBgzfBytes(extractBcfHeader(vcfPath))
+    let (firstDataBlockOff, uOff) = bcfFirstDataVirtualOffset(vcfPath)
+    starts = scanBgzfBlockStarts(vcfPath, startAt = firstDataBlockOff)
+    if starts.len > 0 and fileSize - starts[^1] == 28:
+      starts.setLen(starts.len - 1)
+    let csi = vcfPath & ".csi"
+    csiVoffs = parseCsiVirtualOffsets(csi)
+    let firstVO = (firstDataBlockOff, uOff)
+    if firstVO notin csiVoffs: csiVoffs.add(firstVO)
+    csiVoffs.sort(proc(a, b: (int64, int)): int =
+      if a[0] != b[0]: cmp(a[0], b[0]) else: cmp(a[1], b[1]))
+  else:
+    let (hb, fb) = getHeaderAndFirstBlock(vcfPath)
+    headerBytes = decompressBgzfBytes(hb)
+    starts = scanAllBlockStarts(vcfPath, fb)
+
+  var sizes = getLengths(starts, fileSize)
+  let assignment = interleavedBlockAssignment(starts.len, nShards, chunkSize)
+  var inboxes = newInboxArray(nShards)
+
+  setMaxPoolSize(nShards)
+  result = newSeq[string](nShards)
+  var fvs = newSeq[FlowVar[int]](nShards)
+  for i in 0 ..< nShards:
+    let ext = if fmt == ffBcf: ".bcf" else: ".vcf"
+    result[i] = tmpDir / &"shard_{i+1}{ext}"
+    let fd = posix.open(result[i].cstring,
+                        O_WRONLY or O_CREAT or O_TRUNC, 0o666.Mode)
+    doAssert fd >= 0, &"SC9: could not create {result[i]}"
+    var task = InterleavedTask(
+      vcfPath: vcfPath, outFd: fd,
+      headerBytes: headerBytes,
+      blockStarts: addr starts, blockSizes: addr sizes,
+      chunkIndices: assignment[i], format: fmt,
+      csiVoffs: if fmt == ffBcf: addr csiVoffs else: nil,
+      shardIdx: i, nShards: nShards, chunkSize: chunkSize,
+      inboxes: addr inboxes)
+    fvs[i] = spawn writeInterleavedShard(task)
+  for fv in fvs:
+    discard ^fv
+  freeInboxArray(inboxes)
+
+# ---------------------------------------------------------------------------
+# SC9.1 — 1 shard interleaved = all records present (VCF)
+# ---------------------------------------------------------------------------
+block testInterleavedWrite1Shard:
+  let tmpDir = createTempDir("vcfparty_", "")
+  let paths = writeInterleavedShards(SmallVcf, 1, 3, tmpDir, ffVcf)
+  let orig = countRecords(SmallVcf)
+  let got  = countRecords(paths[0])
+  doAssert got == orig, &"SC9.1: record count mismatch: got {got}, expected {orig}"
+  removeDir(tmpDir)
+  echo &"PASS SC9.1 writeInterleavedShard: 1 shard VCF, {orig} records"
+
+# ---------------------------------------------------------------------------
+# SC9.2 — 4 shards interleaved, all records present (VCF)
+# ---------------------------------------------------------------------------
+block testInterleavedWrite4ShardsVcf:
+  let tmpDir = createTempDir("vcfparty_", "")
+  let paths = writeInterleavedShards(SmallVcf, 4, 2, tmpDir, ffVcf)
+  let orig = countRecords(SmallVcf)
+  var total = 0
+  for p in paths: total += countRecords(p)
+  doAssert total == orig,
+    &"SC9.2: record count mismatch: got {total}, expected {orig}"
+  removeDir(tmpDir)
+  echo &"PASS SC9.2 writeInterleavedShard: 4 shards VCF, {orig} records total"
+
+# ---------------------------------------------------------------------------
+# SC9.3 — BCF 4 shards interleaved, all records present
+# ---------------------------------------------------------------------------
+block testInterleavedWrite4ShardsBcf:
+  let tmpDir = createTempDir("vcfparty_", "")
+  let paths = writeInterleavedShards(SmallBcf, 4, 2, tmpDir, ffBcf)
+  let orig = countRecords(SmallBcf)
+  var total = 0
+  for p in paths: total += countRecords(p)
+  doAssert total == orig,
+    &"SC9.3: BCF record count mismatch: got {total}, expected {orig}"
+  removeDir(tmpDir)
+  echo &"PASS SC9.3 writeInterleavedShard: 4 shards BCF, {orig} records total"
+
+# ---------------------------------------------------------------------------
+# SC9.4 — K=1 forces maximum chunk boundaries; still all records present
+# ---------------------------------------------------------------------------
+block testInterleavedWriteK1:
+  let tmpDir = createTempDir("vcfparty_", "")
+  let paths = writeInterleavedShards(SmallVcf, 4, 1, tmpDir, ffVcf)
+  let orig = countRecords(SmallVcf)
+  var total = 0
+  for p in paths: total += countRecords(p)
+  doAssert total == orig,
+    &"SC9.4: K=1 record count mismatch: got {total}, expected {orig}"
+  removeDir(tmpDir)
+  echo &"PASS SC9.4 writeInterleavedShard: K=1, 4 shards VCF, {orig} records"
+
 

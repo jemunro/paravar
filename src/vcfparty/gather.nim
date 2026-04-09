@@ -3,7 +3,7 @@
 ## Implements the gather pipeline:
 ##   inferFileFormat → GatherConfig → runInterceptor (per shard) → concatenateShards
 
-import std/[heapqueue, options, os, strformat, strutils]
+import std/[heapqueue, options, os, strformat, strutils, tables]
 import std/posix
 {.warning[Deprecated]: off.}
 import std/threadpool
@@ -110,10 +110,6 @@ var gStreamIsBgzf*:   bool = false   ## Whether shard 0 stream was BGZF-compress
 ## as the format-detection release flag for shards 1..N: they spin on it before
 ## reading gDetectedFormat or gStreamIsBgzf.
 var gChromLine*: SharedBuf
-
-## C4: expected output format letter (z/v/b/u) set by runRun before orchestrator.
-## '\0' means no -O flag; non-'\0' triggers format validation in shard 0 interceptor.
-var gExpectedOutputFmt*: char = '\0'
 
 ## M5 merge globals — set by shard 0 feeder, read by main thread.
 var gMergeFormat*:     FileFormat = ffVcf
@@ -283,33 +279,145 @@ proc extractContigTable*(headerBytes: seq[byte]): seq[string] =
     i = j + 1
 
 # ---------------------------------------------------------------------------
-# M2 — Single-record readers from raw (uncompressed) file descriptors
+# M2 — Buffered fd reader and single-record readers
 # ---------------------------------------------------------------------------
 
+const FdBufSize = 65536
+
+type BufferedFdReader* = object
+  ## Buffered reader wrapping a POSIX file descriptor.  Reads FdBufSize bytes
+  ## at a time to amortise syscall overhead.
+  fd*:   cint
+  buf:   array[FdBufSize, byte]
+  pos:   int     ## next unread byte in buf
+  len:   int     ## number of valid bytes in buf
+  eof:   bool
+
+proc initBufferedFdReader*(fd: cint): BufferedFdReader =
+  BufferedFdReader(fd: fd, pos: 0, len: 0, eof: false)
+
+proc fill(r: var BufferedFdReader) =
+  ## Refill the internal buffer from the fd.
+  if r.eof: return
+  let n = posix.read(r.fd, addr r.buf[0], FdBufSize)
+  if n <= 0:
+    r.eof = true
+    r.len = 0
+  else:
+    r.len = n
+  r.pos = 0
+
+proc readExact(r: var BufferedFdReader; dst: var openArray[byte]; count: int): bool =
+  ## Read exactly `count` bytes into dst. Returns false on EOF before count.
+  var written = 0
+  while written < count:
+    if r.pos >= r.len:
+      r.fill()
+      if r.eof: return false
+    let avail = min(r.len - r.pos, count - written)
+    copyMem(addr dst[written], addr r.buf[r.pos], avail)
+    r.pos += avail
+    written += avail
+  return true
+
+proc readNextVcfRecord*(r: var BufferedFdReader): seq[byte] =
+  ## Read one VCF record (\n-terminated line) from the buffered reader.
+  result = @[]
+  while true:
+    if r.pos >= r.len:
+      r.fill()
+      if r.eof: return
+    # Scan for \n in the buffered data.
+    let start = r.pos
+    var i = start
+    while i < r.len:
+      if r.buf[i] == byte('\n'):
+        # Found end of record. Copy start..i (inclusive) to result.
+        let chunk = i - start + 1
+        let oldLen = result.len
+        result.setLen(oldLen + chunk)
+        copyMem(addr result[oldLen], addr r.buf[start], chunk)
+        r.pos = i + 1
+        return
+      inc i
+    # No \n found — copy entire remaining buffer and refill.
+    let chunk = r.len - start
+    let oldLen = result.len
+    result.setLen(oldLen + chunk)
+    copyMem(addr result[oldLen], addr r.buf[start], chunk)
+    r.pos = r.len
+
+proc readNextBcfRecord*(r: var BufferedFdReader): seq[byte] =
+  ## Read one BCF binary record from the buffered reader.
+  var hdr: array[8, byte]
+  if not r.readExact(hdr, 8): return @[]
+  let lShared = (hdr[0].uint32 or (hdr[1].uint32 shl 8) or
+                 (hdr[2].uint32 shl 16) or (hdr[3].uint32 shl 24)).int
+  let lIndiv  = (hdr[4].uint32 or (hdr[5].uint32 shl 8) or
+                 (hdr[6].uint32 shl 16) or (hdr[7].uint32 shl 24)).int
+  let payloadLen = lShared + lIndiv
+  result = newSeq[byte](8 + payloadLen)
+  copyMem(addr result[0], addr hdr[0], 8)
+  # Read payload directly into result[8..].
+  var written = 0
+  while written < payloadLen:
+    if r.pos >= r.len:
+      r.fill()
+      if r.eof: return @[]
+    let avail = min(r.len - r.pos, payloadLen - written)
+    copyMem(addr result[8 + written], addr r.buf[r.pos], avail)
+    r.pos += avail
+    written += avail
+
+# ---------------------------------------------------------------------------
+# Buffered fd writer — batches small writes into 64KB syscalls
+# ---------------------------------------------------------------------------
+
+type BufferedFdWriter* = object
+  fd:   cint
+  buf:  array[FdBufSize, byte]
+  pos:  int
+
+proc initBufferedFdWriter*(fd: cint): BufferedFdWriter =
+  BufferedFdWriter(fd: fd, pos: 0)
+
+proc flush*(w: var BufferedFdWriter) =
+  var written = 0
+  while written < w.pos:
+    let n = posix.write(w.fd, addr w.buf[written], w.pos - written)
+    if n <= 0: break
+    written += n
+  w.pos = 0
+
+proc write*(w: var BufferedFdWriter; data: openArray[byte]) =
+  var srcPos = 0
+  while srcPos < data.len:
+    let space = FdBufSize - w.pos
+    let chunk = min(space, data.len - srcPos)
+    copyMem(addr w.buf[w.pos], unsafeAddr data[srcPos], chunk)
+    w.pos += chunk
+    srcPos += chunk
+    if w.pos >= FdBufSize:
+      w.flush()
+
+# Unbuffered single-record readers for backward compatibility with tests.
+# These read one record without buffering, so they work when called repeatedly
+# on the same fd without losing data between calls.
 proc readNextVcfRecord*(fd: cint): seq[byte] =
-  ## Read exactly one VCF record (a single `\n`-terminated line) from fd.
-  ## Returns the bytes including the trailing newline.
-  ## Returns an empty seq on EOF or read error.
-  ## TODO: reads one byte per syscall; buffer in Milestone 3.
   result = @[]
   var b: byte
   while true:
     let n = posix.read(fd, addr b, 1)
-    if n <= 0: return  # EOF or error
+    if n <= 0: return
     result.add(b)
     if b == byte('\n'): return
 
 proc readNextBcfRecord*(fd: cint): seq[byte] =
-  ## Read exactly one BCF binary record from fd.
-  ## BCF record layout: l_shared(4) + l_indiv(4) + shared(l_shared) + indiv(l_indiv).
-  ## Returns all 8 + l_shared + l_indiv bytes.
-  ## Returns an empty seq on EOF or read error.
-  result = @[]
   var hdr: array[8, byte]
   var got = 0
   while got < 8:
     let n = posix.read(fd, addr hdr[got], 8 - got)
-    if n <= 0: return  # EOF or error on header read
+    if n <= 0: return @[]
     got += n
   let lShared = (hdr[0].uint32 or (hdr[1].uint32 shl 8) or
                  (hdr[2].uint32 shl 16) or (hdr[3].uint32 shl 24)).int
@@ -321,21 +429,24 @@ proc readNextBcfRecord*(fd: cint): seq[byte] =
   var pos = 8
   while pos < result.len:
     let n = posix.read(fd, addr result[pos], result.len - pos)
-    if n <= 0: return @[]  # partial read → treat as error
+    if n <= 0: return @[]
     pos += n
 
 # ---------------------------------------------------------------------------
 # M3 — Sort key extraction from a single record
 # ---------------------------------------------------------------------------
 
+proc buildContigMap*(contigTable: seq[string]): Table[string, int] =
+  ## Build a hash map from contig name → rank for O(1) lookup.
+  result = initTable[string, int]()
+  for i, name in contigTable:
+    result[name] = i
+
 proc extractSortKey*(record: seq[byte]; fmt: FileFormat;
-                     contigTable: seq[string]): (int, int32) =
+                     contigMap: Table[string, int];
+                     chromBuf: var string): (int, int32) =
   ## Return (contig_rank, pos) for a single uncompressed record.
-  ## contig_rank is the 0-based index of CHROM in contigTable, or high(int) if not found.
-  ## pos is 0-based (VCF POS is 1-based; we subtract 1).
-  ## For BCF: CHROM is int32 at offset 8, POS is int32 at offset 12 of the full record.
-  ## For VCF: CHROM is the first tab-delimited field; POS is the second field.
-  ## Returns (high(int), 0) on parse error or empty record.
+  ## chromBuf is a reusable scratch string to avoid per-record allocation.
   if record.len == 0: return (high(int), 0'i32)
   if fmt == ffBcf:
     if record.len < 16: return (high(int), 0'i32)
@@ -343,10 +454,9 @@ proc extractSortKey*(record: seq[byte]; fmt: FileFormat;
                         (record[10].uint32 shl 16) or (record[11].uint32 shl 24))
     let pos     = int32(record[12].uint32 or (record[13].uint32 shl 8) or
                         (record[14].uint32 shl 16) or (record[15].uint32 shl 24))
-    let rank = if chromId >= 0 and chromId < contigTable.len: chromId.int else: high(int)
+    let rank = if chromId >= 0 and chromId < contigMap.len: chromId.int else: high(int)
     result = (rank, pos)
   else:
-    # VCF: parse CHROM (field 0) and POS (field 1) from tab-delimited text.
     var tab0 = -1
     var tab1 = -1
     for i in 0 ..< record.len:
@@ -354,12 +464,10 @@ proc extractSortKey*(record: seq[byte]; fmt: FileFormat;
         if tab0 < 0: tab0 = i
         elif tab1 < 0: tab1 = i; break
     if tab0 < 0 or tab1 < 0: return (high(int), 0'i32)
-    var chrom = newString(tab0)
-    for i in 0 ..< tab0: chrom[i] = char(record[i])
-    var rank = high(int)
-    for ci in 0 ..< contigTable.len:
-      if contigTable[ci] == chrom: rank = ci; break
-    # Parse POS (1-based in VCF; stored 0-based internally).
+    # Reuse chromBuf to avoid per-record heap allocation.
+    chromBuf.setLen(tab0)
+    for i in 0 ..< tab0: chromBuf[i] = char(record[i])
+    let rank = contigMap.getOrDefault(chromBuf, high(int))
     var pos: int32 = 0
     for i in (tab0 + 1) ..< tab1:
       let d = record[i].int - '0'.int
@@ -367,6 +475,18 @@ proc extractSortKey*(record: seq[byte]; fmt: FileFormat;
       pos = pos * 10 + d.int32
     pos -= 1
     result = (rank, pos)
+
+proc extractSortKey*(record: seq[byte]; fmt: FileFormat;
+                     contigMap: Table[string, int]): (int, int32) =
+  ## Convenience overload without scratch buffer.
+  var buf = ""
+  extractSortKey(record, fmt, contigMap, buf)
+
+
+# Backward-compatible overload for tests using seq[string] contigTable.
+proc extractSortKey*(record: seq[byte]; fmt: FileFormat;
+                     contigTable: seq[string]): (int, int32) =
+  extractSortKey(record, fmt, buildContigMap(contigTable))
 
 # ---------------------------------------------------------------------------
 # M4 — k-way merge from sorted fd streams
@@ -391,32 +511,36 @@ proc kWayMerge*(fds: seq[cint]; outFd: cint; fmt: FileFormat;
   ## Records are emitted to outFd in merged genomic order.
   ## fds may be any POSIX file descriptors (pipes, files, etc.).
   var heap = initHeapQueue[MergeEntry]()
+  let contigMap = buildContigMap(contigTable)
+  var writer = initBufferedFdWriter(outFd)
+  var chromBuf = ""
 
-  template nextRec(fd: cint): seq[byte] =
-    if fmt == ffBcf: readNextBcfRecord(fd)
-    else:            readNextVcfRecord(fd)
+  # Create one buffered reader per input fd.
+  var readers = newSeq[BufferedFdReader](fds.len)
+  for i in 0 ..< fds.len:
+    readers[i] = initBufferedFdReader(fds[i])
+
+  template nextRec(idx: int): seq[byte] =
+    if fmt == ffBcf: readers[idx].readNextBcfRecord()
+    else:            readers[idx].readNextVcfRecord()
 
   # Seed the heap with the first record from each stream.
   for i in 0 ..< fds.len:
-    let rec = nextRec(fds[i])
+    var rec = nextRec(i)
     if rec.len > 0:
-      let (rank, pos) = extractSortKey(rec, fmt, contigTable)
-      heap.push(MergeEntry(rank: rank, pos: pos, fdIdx: i, rec: rec))
+      let (rank, pos) = extractSortKey(rec, fmt, contigMap, chromBuf)
+      heap.push(MergeEntry(rank: rank, pos: pos, fdIdx: i, rec: move rec))
 
   # Merge loop: always emit the minimum-key record.
   while heap.len > 0:
-    var entry = heap.pop()
-    var written = 0
-    while written < entry.rec.len:
-      let n = posix.write(outFd, cast[pointer](addr entry.rec[written]),
-                          entry.rec.len - written)
-      if n <= 0: return
-      written += n
+    let entry = heap.pop()
+    writer.write(entry.rec)
     # Refill from the same stream.
-    let rec = nextRec(fds[entry.fdIdx])
+    var rec = nextRec(entry.fdIdx)
     if rec.len > 0:
-      let (rank, pos) = extractSortKey(rec, fmt, contigTable)
-      heap.push(MergeEntry(rank: rank, pos: pos, fdIdx: entry.fdIdx, rec: rec))
+      let (rank, pos) = extractSortKey(rec, fmt, contigMap, chromBuf)
+      heap.push(MergeEntry(rank: rank, pos: pos, fdIdx: entry.fdIdx, rec: move rec))
+  writer.flush()
 
 # ---------------------------------------------------------------------------
 # S2 — #CHROM line extraction helpers
@@ -659,16 +783,6 @@ proc runInterceptor*(cfg: GatherConfig; shardIdx: int; inputFd: cint; tmpPath: s
       for k in 0 ..< gChromLine.len.int:
         gChromLine.buf[k] = byte(chromStr[k])
       gChromLine.ready = true
-      # C4: validate pipeline output format against -O letter if provided.
-      if gExpectedOutputFmt != '\0':
-        let expected = if gExpectedOutputFmt in {'z', 'v'}: ffVcf else: ffBcf
-        if gDetectedFormat != expected:
-          let expName = if expected == ffVcf: "VCF" else: "BCF"
-          stderr.writeLine "error: -O" & gExpectedOutputFmt &
-            ": pipeline output is " & $gDetectedFormat &
-            " but -O" & gExpectedOutputFmt & " expects " & expName &
-            "; format conversion is the pipeline's responsibility"
-          quit(1)
       # Shard 0: no header stripping; apply recompression only.
       # Strip the terminal EOF block appended by the pipeline —
       # concatenateShards writes a single EOF block once at the very end.

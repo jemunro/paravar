@@ -1,7 +1,7 @@
 ## Tests for gather.nim — G1: types, inferFileFormat, validateGatherConfig.
 ## Run from project root: nim c -d:debug -r tests/test_gather.nim
 
-import std/[os, osproc, options, strformat, strutils]
+import std/[os, osproc, options, strformat, strutils, tempfiles]
 import std/posix
 import "../src/vcfparty/gather"
 import "../src/vcfparty/vcf_utils"
@@ -770,8 +770,7 @@ proc runGather(args: string): (string, int) =
 # ---------------------------------------------------------------------------
 
 block testGatherVcfCompressed:
-  let tmpDir = getTempDir() / "vcfparty_g7_vcf_oz"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.vcf.gz"
   let (outp, code) = runGather(
     &"-n 4 -o {outPath} {SmallVcf} ::: bcftools view -Oz +concat+")
@@ -790,8 +789,7 @@ block testGatherVcfCompressed:
 # ---------------------------------------------------------------------------
 
 block testGatherVcfRecompress:
-  let tmpDir = getTempDir() / "vcfparty_g7_vcf_ov"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.vcf.gz"
   let (outp, code) = runGather(
     &"-n 4 -o {outPath} {SmallVcf} ::: bcftools view -Ov +concat+")
@@ -810,8 +808,7 @@ block testGatherVcfRecompress:
 # ---------------------------------------------------------------------------
 
 block testGatherBcfCompressed:
-  let tmpDir = getTempDir() / "vcfparty_g7_bcf_ob"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.bcf"
   let (outp, code) = runGather(
     &"-n 4 -o {outPath} {SmallBcf} ::: bcftools view -Ob +concat+")
@@ -830,8 +827,7 @@ block testGatherBcfCompressed:
 # ---------------------------------------------------------------------------
 
 block testGatherBcfRecompress:
-  let tmpDir = getTempDir() / "vcfparty_g7_bcf_ou"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.bcf"
   let (outp, code) = runGather(
     &"-n 4 -o {outPath} {SmallBcf} ::: bcftools view -Ou +concat+")
@@ -850,8 +846,7 @@ block testGatherBcfRecompress:
 # ---------------------------------------------------------------------------
 
 block testGatherText:
-  let tmpDir = getTempDir() / "vcfparty_g7_text"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.txt"
   let (outp, code) = runGather(
     &"-n 4 -o {outPath} {SmallVcf} ::: bcftools query -f '%CHROM\\t%POS\\n' +concat+")
@@ -873,8 +868,7 @@ block testGatherTextHeaderN:
   # Pipeline prepends a fixed header line to each shard's output.
   # With --header-n 1, shards 2..4 should have their header line stripped.
   # Result: 1 header line + 5000 data lines = 5001 lines total.
-  let tmpDir = getTempDir() / "vcfparty_g7_text_headern"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.txt"
   let pipeline = "{ echo 'CHROM\tPOS'; bcftools query -f '%CHROM\\t%POS\\n'; }"
   let (outp, code) = runGather(
@@ -900,8 +894,7 @@ block testGatherTextHeaderN:
 block testGatherUnknownExt:
   # .out.gz is not a recognised VCF/BCF prefix → inferred as text, BGZF (from .gz).
   # No --gather-fmt needed under the new lenient inference rules.
-  let tmpDir = getTempDir() / "vcfparty_g7_unknown_ext"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.out.gz"
   let (outp, code) = runGather(
     &"-n 4 -o {outPath} " &
@@ -929,44 +922,21 @@ block testGatherUnknownExt:
 # ---------------------------------------------------------------------------
 
 block testGatherShardFailure:
-  let tmpDir  = getTempDir() / "vcfparty_g7_fail"
-  let tDir    = getTempDir() / "vcfparty_g7_fail_tmp"
-  createDir(tmpDir)
+  let tmpDir  = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.vcf.gz"
   let (outp, code) = runGather(
-    &"-n 2 -o {outPath} --tmp-dir {tDir} {SmallVcf} ::: false +concat+")
+    &"-n 2 -o {outPath} {SmallVcf} ::: false +concat+")
   doAssert code != 0, "shard failure: vcfparty should exit non-zero"
   # At least one temp path should be printed to stderr.
-  doAssert tDir in outp,
-    &"shard failure: expected tmp dir path in stderr, got:\n{outp}"
-  # Temp dir should still exist (files left for debugging).
-  doAssert dirExists(tDir), "shard failure: tmp dir should be preserved"
-  # Cleanup.
+  doAssert "vcfparty_" in outp,
+    &"shard failure: expected temp path in stderr, got:\n{outp}"
   removeDir(tmpDir)
-  removeDir(tDir)
-  echo "PASS G5.8 shard failure: exit non-zero, temp paths printed, files preserved"
+  echo "PASS G5.8 shard failure: exit non-zero, temp paths printed"
 
 # ---------------------------------------------------------------------------
 # G7.9 — --tmp-dir custom path
 # ---------------------------------------------------------------------------
 
-block testGatherCustomTmpDir:
-  let tmpDir    = getTempDir() / "vcfparty_g7_custom_tmp"
-  let customTmp = getTempDir() / "vcfparty_g7_my_tmp_dir"
-  createDir(tmpDir)
-  let outPath = tmpDir / "out.vcf.gz"
-  let (outp, code) = runGather(
-    &"-n 4 -o {outPath} --tmp-dir {customTmp} " &
-    &"{SmallVcf} ::: bcftools view -Oz +concat+")
-  doAssert code == 0, &"--tmp-dir exited {code}:\n{outp}"
-  doAssert fileExists(outPath), "--tmp-dir: output missing"
-  # On success the custom tmp dir should be cleaned up.
-  doAssert not dirExists(customTmp), "--tmp-dir: custom dir should be removed on success"
-  let got = countRecords(outPath)
-  let orig = countRecords(SmallVcf)
-  doAssert got == orig, &"--tmp-dir: record count {got} != {orig}"
-  removeDir(tmpDir)
-  echo &"PASS G5.9 --tmp-dir custom path: {got} records, tmp dir cleaned up"
 
 # ---------------------------------------------------------------------------
 # G7.10 — testGatherTextHeaderPattern: --header-pattern strips matching lines from shards 2..N
@@ -976,8 +946,7 @@ block testGatherTextHeaderPattern:
   # Pipeline prepends a "##"-prefixed header line to each shard's output.
   # With --header-pattern "##", shards 2..4 should have that line stripped.
   # Result: 1 header line + 5000 data lines = 5001 lines total.
-  let tmpDir = getTempDir() / "vcfparty_g7_text_headerpattern"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.txt"
   let pipeline = "{ echo '##CHROM\tPOS'; bcftools query -f '%CHROM\\t%POS\\n'; }"
   let (outp, code) = runGather(
@@ -1008,8 +977,7 @@ proc runGatherSubcmd(args: string): (string, int) =
 # ---------------------------------------------------------------------------
 
 block testGatherSubcmdVcf:
-  let tmpDir = getTempDir() / "vcfparty_g8_vcf"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let shardTemplate = tmpDir / "shard.{}.vcf.gz"
   # Scatter into 4 shards via CLI.
   let (sOutp, sCode) = execCmdEx(
@@ -1037,8 +1005,7 @@ block testGatherSubcmdVcf:
 # ---------------------------------------------------------------------------
 
 block testGatherSubcmdBcf:
-  let tmpDir = getTempDir() / "vcfparty_g8_bcf"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let (sOutp, sCode) = execCmdEx(
     BinPath & &" scatter -n 4 -o {tmpDir}/shard.bcf {SmallBcf} 2>&1")
   doAssert sCode == 0, &"G8.2 scatter exited {sCode}:\n{sOutp}"
@@ -1063,8 +1030,7 @@ block testGatherSubcmdBcf:
 # ---------------------------------------------------------------------------
 
 block testGatherSubcmdStdout:
-  let tmpDir = getTempDir() / "vcfparty_g8_stdout"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let (sOutp, sCode) = execCmdEx(
     BinPath & &" scatter -n 4 -o {tmpDir}/shard.vcf.gz {SmallVcf} 2>&1")
   doAssert sCode == 0, &"G8.3 scatter exited {sCode}:\n{sOutp}"
@@ -1089,8 +1055,7 @@ block testGatherSubcmdStdout:
 # ---------------------------------------------------------------------------
 
 block testGatherSubcmdNoInputs:
-  let tmpDir = getTempDir() / "vcfparty_g8_noinput"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.vcf.gz"
   let (outp, code) = runGatherSubcmd(&"-o {outPath}")
   doAssert code != 0, "G8.4: no inputs should exit non-zero"
@@ -1102,8 +1067,7 @@ block testGatherSubcmdNoInputs:
 # ---------------------------------------------------------------------------
 
 block testGatherSubcmdMissingFile:
-  let tmpDir = getTempDir() / "vcfparty_g8_missing"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.vcf.gz"
   let (outp, code) = runGatherSubcmd(&"-o {outPath} /nonexistent/shard.vcf.gz")
   doAssert code != 0, "G8.5: missing input file should exit non-zero"
@@ -1117,8 +1081,7 @@ block testGatherSubcmdMissingFile:
 # ---------------------------------------------------------------------------
 
 block testRunGatherStdout:
-  let tmpDir = getTempDir() / "vcfparty_g8_rungather_stdout"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let stdoutFile = tmpDir / "stdout.vcf"
   # No -o; stdout is captured via shell redirection.
   let (outp, code) = execCmdEx(
@@ -1129,58 +1092,6 @@ block testRunGatherStdout:
   doAssert got == orig, &"G8.6: record count {got} != {orig}"
   removeDir(tmpDir)
   echo &"PASS G6.6 run +concat+ stdout: {got} records written to stdout"
-
-# ---------------------------------------------------------------------------
-# G8.7 — gather --merge VCF: 4 shards → sorted output, record count and hash match
-# ---------------------------------------------------------------------------
-
-block testGatherMergeVcf:
-  let tmpDir = getTempDir() / "vcfparty_g8_merge_vcf"
-  createDir(tmpDir)
-  let (sOutp, sCode) = execCmdEx(
-    BinPath & &" scatter -n 4 -o {tmpDir}/shard.vcf.gz {SmallVcf} 2>&1")
-  doAssert sCode == 0, &"G8.7 scatter exited {sCode}:\n{sOutp}"
-  var shards: seq[string]
-  for i in 1..4:
-    shards.add(tmpDir / ("shard_" & $i & ".shard.vcf.gz"))
-  let shardsArg = shards.join(" ")
-  let outPath = tmpDir / "merged.vcf"
-  let (gOutp, gCode) = runGatherSubcmd(&"--merge -o {outPath} {shardsArg}")
-  doAssert gCode == 0, &"G8.7 gather --merge exited {gCode}:\n{gOutp}"
-  doAssert fileExists(outPath), "G8.7: output missing"
-  let got  = countRecords(outPath)
-  let orig = countRecords(SmallVcf)
-  doAssert got == orig, &"G8.7: record count {got} != {orig}"
-  doAssert recordsHash(outPath) == recordsHash(SmallVcf),
-    "G8.7: content hash mismatch vs original"
-  removeDir(tmpDir)
-  echo &"PASS G6.7 gather --merge VCF: {got} records, content hash matches"
-
-# ---------------------------------------------------------------------------
-# G8.8 — gather --merge BCF: 4 shards → sorted output, record count and hash match
-# ---------------------------------------------------------------------------
-
-block testGatherMergeBcf:
-  let tmpDir = getTempDir() / "vcfparty_g8_merge_bcf"
-  createDir(tmpDir)
-  let (sOutp, sCode) = execCmdEx(
-    BinPath & &" scatter -n 4 -o {tmpDir}/shard.bcf {SmallBcf} 2>&1")
-  doAssert sCode == 0, &"G8.8 scatter exited {sCode}:\n{sOutp}"
-  var shards: seq[string]
-  for i in 1..4:
-    shards.add(tmpDir / ("shard_" & $i & ".shard.bcf"))
-  let shardsArg = shards.join(" ")
-  let outPath = tmpDir / "merged.bcf"
-  let (gOutp, gCode) = runGatherSubcmd(&"--merge -o {outPath} {shardsArg}")
-  doAssert gCode == 0, &"G8.8 gather --merge BCF exited {gCode}:\n{gOutp}"
-  doAssert fileExists(outPath), "G8.8: output missing"
-  let got  = countRecords(outPath)
-  let orig = countRecords(SmallBcf)
-  doAssert got == orig, &"G8.8: record count {got} != {orig}"
-  doAssert recordsHash(outPath) == recordsHash(SmallBcf),
-    "G8.8: content hash mismatch vs original"
-  removeDir(tmpDir)
-  echo &"PASS G6.8 gather --merge BCF: {got} records, content hash matches"
 
 # ===========================================================================
 # G7 — #CHROM header validation tests
@@ -1268,8 +1179,7 @@ block testChromLineFromFile:
 # ---------------------------------------------------------------------------
 
 block testGatherChromMatch:
-  let tmpDir = getTempDir() / "vcfparty_s2_match"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let (sOutp, sCode) = execCmdEx(
     BinPath & &" scatter -n 2 -o {tmpDir}/shard.vcf.gz {SmallVcf} 2>&1")
   doAssert sCode == 0, &"S2.6 scatter exited {sCode}:\n{sOutp}"
@@ -1291,9 +1201,7 @@ block testGatherChromMatch:
 
 block testGatherChromMismatch:
   # Build two synthetic BGZF-VCF files with different sample columns.
-  let tmpDir = getTempDir() / "vcfparty_s2_mismatch"
-  removeDir(tmpDir)
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let vcfA =
     "##fileformat=VCFv4.2\n" &
     "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSampleA\n" &
@@ -1325,37 +1233,6 @@ block testGatherChromMismatch:
     &"S2.7: error message should mention mismatch, got: {gOutp}"
   removeDir(tmpDir)
   echo "PASS G7.7 gather #CHROM mismatch: exits 1, no partial output"
-
-# ===========================================================================
-# G8 — gather --concat / --merge flag tests
-# ===========================================================================
-
-# ---------------------------------------------------------------------------
-# G9.2 — --merge: warning emitted, output is correct (falls back to --concat)
-# ---------------------------------------------------------------------------
-
-block testGatherMergeWarning:
-  let tmpDir = getTempDir() / "vcfparty_g9_merge"
-  createDir(tmpDir)
-  let (sOutp, sCode) = execCmdEx(
-    BinPath & &" scatter -n 4 -o {tmpDir}/shard.vcf.gz {SmallVcf} 2>&1")
-  doAssert sCode == 0, &"G9.2 scatter exited {sCode}:\n{sOutp}"
-  var shards: seq[string]
-  for i in 1..4:
-    shards.add(tmpDir / ("shard_" & $i & ".shard.vcf.gz"))
-  let shardsArg = shards.join(" ")
-  let outPath = tmpDir / "gathered.vcf.gz"
-  # Capture stderr too to check for the warning.
-  let (gOutp, gCode) = runGatherSubcmd(&"--merge -o {outPath} {shardsArg}")
-  doAssert gCode == 0, &"G9.2 gather --merge exited {gCode}:\n{gOutp}"
-  doAssert fileExists(outPath), "G9.2: output missing"
-  let got  = countRecords(outPath)
-  let orig = countRecords(SmallVcf)
-  doAssert got == orig, &"G9.2: record count {got} != {orig}"
-  doAssert recordsHash(outPath) == recordsHash(SmallVcf),
-    "G9.2: content hash mismatch"
-  removeDir(tmpDir)
-  echo &"PASS G8.1 gather --merge: {got} records, content hash matches"
 
 # ---------------------------------------------------------------------------
 # G9 — extractContigTable
@@ -1614,7 +1491,7 @@ block testKWayMergeVcfTwoStreams:
     discard posix.write(wfd2, cast[pointer](addr d[0]), d.len)
   discard posix.close(wfd2)
 
-  let tmpOut = getTempDir() / "vcfparty_m4_1.vcf"
+  let tmpOut = createTempDir("vcfparty_", "") / "m4_1.vcf"
   let outFd = posix.open(tmpOut.cstring, O_WRONLY or O_CREAT or O_TRUNC, Mode(0o644))
   doAssert outFd >= 0, "M4.1: failed to open output file"
   kWayMerge(@[rfd1, rfd2], outFd, ffVcf, contigs)
@@ -1650,7 +1527,7 @@ block testKWayMergeSingleStream:
     discard posix.write(wfd, cast[pointer](addr d[0]), d.len)
   discard posix.close(wfd)
 
-  let tmpOut = getTempDir() / "vcfparty_m4_2.vcf"
+  let tmpOut = createTempDir("vcfparty_", "") / "m4_2.vcf"
   let outFd = posix.open(tmpOut.cstring, O_WRONLY or O_CREAT or O_TRUNC, Mode(0o644))
   doAssert outFd >= 0, "M4.2: failed to open output file"
   kWayMerge(@[rfd], outFd, ffVcf, contigs)
@@ -1694,7 +1571,7 @@ block testKWayMergeBcfTwoStreams:
     discard posix.write(wfd2, cast[pointer](addr d[0]), d.len)
   discard posix.close(wfd2)
 
-  let tmpOut = getTempDir() / "vcfparty_m4_3.bcf"
+  let tmpOut = createTempDir("vcfparty_", "") / "m4_3.bcf"
   let outFd = posix.open(tmpOut.cstring, O_WRONLY or O_CREAT or O_TRUNC, Mode(0o644))
   doAssert outFd >= 0, "M4.3: failed to open output file"
   kWayMerge(@[rfd1, rfd2], outFd, ffBcf, contigs)

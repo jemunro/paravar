@@ -6,7 +6,7 @@
 ##   3. Optimise shard boundaries using weighted bisection + block validation.
 ##   4. Write shards: header + raw middle blocks + recompressed boundary blocks + EOF.
 
-import std/[algorithm, cpuinfo, os, posix, sequtils, sets, strformat, strutils]
+import std/[algorithm, atomics, cpuinfo, os, posix, sequtils, sets, strformat, strutils]
 {.warning[Deprecated]: off.}
 import std/threadpool
 {.warning[Deprecated]: on.}
@@ -91,6 +91,39 @@ proc parseTbiBlockStarts*(tbiPath: string): seq[int64] =
   starts.sort()
   result = starts.deduplicate(isSorted = true)
 
+proc parseTbiVirtualOffsets*(tbiPath: string): seq[(int64, int)] =
+  ## Parse a .tbi index and return sorted unique virtual offsets as
+  ## (block_file_offset, within_block_offset) pairs for all chunk starts.
+  let raw = decompressBgzfFile(tbiPath)
+  if raw.len < 8 or raw[0] != byte('T') or raw[1] != byte('B') or
+     raw[2] != byte('I') or raw[3] != 0x01:
+    quit(&"parseTbiVirtualOffsets: not a valid TBI index: {tbiPath}", 1)
+  var pos = 4
+  let nRef = readLeI32(raw, pos).int
+  pos += 24                            # skip 6 int32s
+  let lNm = readLeI32(raw, pos).int
+  pos += lNm                          # skip sequence-name block
+  var offsets: seq[(int64, int)]
+  for _ in 0 ..< nRef:
+    let nBin = readLeU32(raw, pos).int
+    for _ in 0 ..< nBin:
+      pos += 4  # skip bin_id
+      let nChunk = readLeU32(raw, pos).int
+      for _ in 0 ..< nChunk:
+        let beg    = readLeU64(raw, pos)
+        let endOff = readLeU64(raw, pos)
+        if endOff > beg:
+          offsets.add(((beg shr 16).int64, (beg and 0xFFFF).int))
+    let nIntv = readLeU32(raw, pos).int
+    pos += 8 * nIntv  # skip linear index intervals
+  offsets.sort(proc(a, b: (int64, int)): int =
+    if a[0] != b[0]: cmp(a[0], b[0]) else: cmp(a[1], b[1]))
+  var deduped: seq[(int64, int)]
+  for i, v in offsets:
+    if i == 0 or v != offsets[i - 1]:
+      deduped.add(v)
+  result = deduped
+
 # ---------------------------------------------------------------------------
 # Index parsing — CSI
 # ---------------------------------------------------------------------------
@@ -171,6 +204,18 @@ proc readIndexBlockStarts*(vcfPath: string): seq[int64] =
   else:
     stderr.writeLine &"error: no index found for {vcfPath} (expected {tbi} or {csi})"
     quit(1)
+
+proc readIndexVirtualOffsets*(vcfPath: string): seq[(int64, int)] =
+  ## Detect a .csi or .tbi index and return sorted unique virtual offsets as
+  ## (block_file_offset, within_block_offset) pairs. Returns @[] if no index.
+  let csi = vcfPath & ".csi"
+  let tbi = vcfPath & ".tbi"
+  if fileExists(csi):
+    result = parseCsiVirtualOffsets(csi)
+  elif fileExists(tbi):
+    result = parseTbiVirtualOffsets(tbi)
+  else:
+    result = @[]
 
 proc scanAllBlockStarts*(vcfPath: string; firstDataBlock: int64): seq[int64] =
   ## Scan the entire BGZF file and return file offsets of all data blocks
@@ -664,14 +709,282 @@ proc computeShards*(vcfPath: string; nShards: int; nThreads: int = 1;
                           boundaryHead: boundaryHead, eofSeq: eofSeq,
                           logLine: "")
 
+# ---------------------------------------------------------------------------
+# Interleaved block assignment
+# ---------------------------------------------------------------------------
+
+proc interleavedBlockAssignment*(nBlocks, nShards, chunkSize: int): seq[seq[Slice[int]]] =
+  ## Assign nBlocks data blocks to nShards shards in round-robin chunks of
+  ## chunkSize.  Returns a seq of length nShards; each element is a list of
+  ## Slice[int] index ranges into the block array.  Every block index in
+  ## 0..<nBlocks appears in exactly one shard's list.
+  result = newSeq[seq[Slice[int]]](nShards)
+  var pos = 0
+  var chunkIdx = 0
+  while pos < nBlocks:
+    let shard = chunkIdx mod nShards
+    let hi = min(pos + chunkSize, nBlocks) - 1  # inclusive end
+    result[shard].add(pos .. hi)
+    pos = hi + 1
+    inc chunkIdx
+
+# ---------------------------------------------------------------------------
+# Interleaved shard writer
+# ---------------------------------------------------------------------------
+
+type InboxSlot* = object
+  ## Single-slot mailbox for cross-worker partial-record handoff.
+  ## Writer deposits buf+len then sets ready=true; reader spins on ready.
+  ## ready uses atomic operations for cross-thread visibility.
+  buf*:   array[4 * 1024 * 1024, byte]
+  len*:   int32
+  ready*: Atomic[bool]
+
+type InboxArray* = object
+  ## Array of per-worker inbox slots, heap-allocated for GC safety.
+  slots*: ptr UncheckedArray[InboxSlot]
+  count*: int
+
+proc newInboxArray*(n: int): InboxArray =
+  ## Allocate n inbox slots, all zeroed (ready = false).
+  let p = cast[ptr UncheckedArray[InboxSlot]](allocShared0(n * sizeof(InboxSlot)))
+  InboxArray(slots: p, count: n)
+
+proc freeInboxArray*(inboxes: InboxArray) =
+  if inboxes.slots != nil:
+    deallocShared(inboxes.slots)
+
+proc deposit*(inboxes: InboxArray; workerIdx: int; data: openArray[byte]) =
+  ## Deposit data into workerIdx's inbox. Spins until the slot is free (ready ==
+  ## false), then writes data and sets ready = true as a release signal.
+  let slot = addr inboxes.slots[workerIdx]
+  # Backpressure: wait for previous drain to complete before overwriting.
+  while slot.ready.load(moAcquire):
+    discard  # spin — slot still occupied by previous cycle
+  let n = min(data.len, slot.buf.len)
+  if n > 0:
+    copyMem(addr slot.buf[0], unsafeAddr data[0], n)
+  slot.len = n.int32
+  slot.ready.store(true, moRelease)
+
+proc drain*(inboxes: InboxArray; workerIdx: int; timeoutMs: int = 10000): seq[byte] =
+  ## Spin-wait until workerIdx's inbox is ready, then return the data and reset.
+  ## Raises an error if timeout is reached (depositing worker likely died).
+  let slot = addr inboxes.slots[workerIdx]
+  var waited = 0
+  while not slot.ready.load(moAcquire):
+    sleep(1)
+    waited += 1
+    if waited >= timeoutMs:
+      stderr.writeLine "error: inbox drain timeout for worker " & $workerIdx &
+        " — depositing worker may have crashed (waited " & $waited & "ms)"
+      quit(1)
+  result = newSeq[byte](slot.len)
+  if slot.len > 0:
+    copyMem(addr result[0], addr slot.buf[0], slot.len)
+  slot.len = 0
+  slot.ready.store(false, moRelease)
+
+proc depositEmpty*(inboxes: InboxArray; workerIdx: int) =
+  ## Signal that no handoff is needed (record boundary fell cleanly).
+  ## Spins until the slot is free before signalling.
+  let slot = addr inboxes.slots[workerIdx]
+  while slot.ready.load(moAcquire):
+    discard  # spin — slot still occupied by previous cycle
+  slot.len = 0
+  slot.ready.store(true, moRelease)
+
+type InterleavedTask* = object
+  vcfPath*:      string
+  outFd*:        cint
+  headerBytes*:  seq[byte]        ## uncompressed VCF/BCF header
+  blockStarts*:  ptr seq[int64]   ## shared: all data block file offsets
+  blockSizes*:   ptr seq[int64]   ## shared: all data block byte sizes
+  chunkIndices*: seq[Slice[int]]  ## this shard's index ranges into blockStarts
+  format*:       FileFormat       ## ffVcf or ffBcf
+  csiVoffs*:     ptr seq[(int64, int)]  ## shared: CSI virtual offsets (BCF only; nil for VCF)
+  shardIdx*:     int              ## this worker's index (0-based)
+  nShards*:      int              ## total number of workers
+  chunkSize*:    int              ## blocks per chunk (for chunkOwner calculation)
+  inboxes*:      ptr InboxArray   ## shared inbox array
+
+proc readAndDecompressBlocks(vcfPath: string; starts: ptr seq[int64];
+                              sizes: ptr seq[int64];
+                              slice: Slice[int]): seq[byte] {.gcsafe.} =
+  ## Read and decompress all BGZF blocks in starts[slice] from vcfPath.
+  ## Each starts[i]..starts[i]+sizes[i] range may contain multiple BGZF blocks
+  ## (when index entries span multiple blocks); decompress each one in sequence.
+  let f = open(vcfPath, fmRead)
+  defer: f.close()
+  result = @[]
+  for i in slice:
+    let offset = starts[][i]
+    let sz     = sizes[][i].int
+    var raw = newSeq[byte](sz)
+    f.setFilePos(offset)
+    discard readBytes(f, raw, 0, sz)
+    var pos = 0
+    while pos < raw.len:
+      let blkSize = bgzfBlockSize(raw.toOpenArray(pos, raw.high))
+      if blkSize <= 0: break
+      result.add(decompressBgzf(raw.toOpenArray(pos, pos + blkSize - 1)))
+      pos += blkSize
+
+proc readAndDecompressOneBlock(vcfPath: string; start: int64;
+                                size: int64): seq[byte] {.gcsafe.} =
+  ## Read and decompress a single BGZF block.
+  let f = open(vcfPath, fmRead)
+  defer: f.close()
+  var blk = newSeq[byte](size.int)
+  f.setFilePos(start)
+  discard readBytes(f, blk, 0, size.int)
+  decompressBgzf(blk)
+
+proc findFirstNewline(data: openArray[byte]): int =
+  ## Return index of first '\n' in data, or -1 if none.
+  for i in 0 ..< data.len:
+    if data[i] == byte('\n'): return i
+  return -1
+
+proc findLastNewline(data: openArray[byte]): int =
+  ## Return index of last '\n' in data, or -1 if none.
+  for i in countdown(data.len - 1, 0):
+    if data[i] == byte('\n'): return i
+  return -1
+
+proc findBcfRecordEnd*(data: openArray[byte]): int =
+  ## Walk BCF records from the start of data.  Return the index just past the
+  ## last complete record, or 0 if not even one complete record fits.
+  var pos = 0
+  while pos + 8 <= data.len:
+    let lShared = cast[ptr uint32](unsafeAddr data[pos])[]
+    let lIndiv  = cast[ptr uint32](unsafeAddr data[pos + 4])[]
+    let recLen  = 8 + lShared.int + lIndiv.int
+    if pos + recLen > data.len:
+      break  # incomplete record
+    pos += recLen
+  return pos
+
+proc headSkipFromIndex*(blockOff: int64; voffs: ptr seq[(int64, int)]): int =
+  ## Look up the index virtual offsets to find the head skip for a block.
+  ## Returns the u_off of the virtual offset entry with matching block_off.
+  ## Used for both BCF (CSI) and indexed VCF (TBI/CSI). The caller guarantees
+  ## blockOff was placed at an index entry boundary, so the lookup always
+  ## succeeds when the index is well-formed.
+  let v = voffs[]
+  var lo = 0
+  var hi = v.len - 1
+  while lo <= hi:
+    let mid = (lo + hi) div 2
+    if v[mid][0] < blockOff:
+      lo = mid + 1
+    elif v[mid][0] > blockOff:
+      hi = mid - 1
+    else:
+      return v[mid][1]
+  return 0  # not found — caller's blockOff wasn't at an index boundary
+
+proc chunkOwner*(blockIdx, nShards, chunkSize: int): int {.inline.} =
+  ## Return the worker index that owns the chunk containing blockIdx.
+  (blockIdx div chunkSize) mod nShards
+
+proc writeInterleavedShard*(task: InterleavedTask): int {.gcsafe.} =
+  ## Write one interleaved shard using the inbox model.
+  ## For each chunk: deposit head to previous worker's inbox, write complete
+  ## records, then unconditionally drain own inbox.  Returns 0.
+  let nTotalBlocks = task.blockStarts[].len
+  var f: File
+  discard open(f, FileHandle(task.outFd), fmWrite)
+  var completedChunks = 0
+  try:
+    # Write header
+    if task.headerBytes.len > 0:
+      discard f.writeBytes(task.headerBytes, 0, task.headerBytes.len)
+
+    for ci, slice in task.chunkIndices:
+      let buf = readAndDecompressBlocks(task.vcfPath, task.blockStarts,
+                                        task.blockSizes, slice)
+
+      # --- Head split: bytes before first record boundary ---
+      var headEnd = 0
+      if slice.a > 0:
+        if task.csiVoffs != nil:
+          # Indexed (BCF or VCF with TBI/CSI): exact u_off lookup
+          headEnd = headSkipFromIndex(task.blockStarts[][slice.a], task.csiVoffs)
+        else:
+          # Unindexed VCF fallback: scan for first newline
+          let nlPos = findFirstNewline(buf)
+          if nlPos >= 0:
+            headEnd = nlPos + 1
+          else:
+            headEnd = buf.len  # entire chunk is one partial line
+
+        let prevOwner = chunkOwner(slice.a - 1, task.nShards, task.chunkSize)
+        if prevOwner == task.shardIdx:
+          # Previous chunk is ours — write head directly (no inbox needed).
+          if headEnd > 0:
+            discard f.writeBytes(buf, 0, headEnd)
+        else:
+          # Deposit to the other worker's inbox.
+          if headEnd > 0:
+            task.inboxes[].deposit(prevOwner, buf.toOpenArray(0, headEnd - 1))
+          else:
+            task.inboxes[].depositEmpty(prevOwner)
+
+      # --- Write records from buf[headEnd..] ---
+      # Write complete records, then trailing partial + inbox data.
+      if headEnd < buf.len:
+        let records = buf[headEnd ..< buf.len]
+        var recEnd: int
+        if task.format == ffBcf:
+          recEnd = findBcfRecordEnd(records)
+        else:
+          let nlPos = findLastNewline(records)
+          recEnd = if nlPos >= 0: nlPos + 1 else: 0
+        if recEnd > 0:
+          discard f.writeBytes(records, 0, recEnd)
+        # Write trailing partial (bytes after last complete record).
+        if recEnd < records.len:
+          discard f.writeBytes(records, recEnd, records.len - recEnd)
+
+      # --- Drain own inbox if the next chunk belongs to a different worker ---
+      if slice.b + 1 < nTotalBlocks:
+        let nextOwner = chunkOwner(slice.b + 1, task.nShards, task.chunkSize)
+        if nextOwner != task.shardIdx:
+          let inboxData = task.inboxes[].drain(task.shardIdx)
+          if inboxData.len > 0:
+            discard f.writeBytes(inboxData, 0, inboxData.len)
+
+      completedChunks = ci + 1
+
+  except IOError:
+    discard  # broken pipe — child exited early
+
+  # Fulfill inbox obligations for any remaining unprocessed chunks so other
+  # workers don't deadlock waiting for deposits that will never come.
+  for ci in completedChunks ..< task.chunkIndices.len:
+    let slice = task.chunkIndices[ci]
+    if slice.a > 0:
+      let prevOwner = chunkOwner(slice.a - 1, task.nShards, task.chunkSize)
+      if prevOwner != task.shardIdx:
+        task.inboxes[].depositEmpty(prevOwner)
+    # Also drain our own inbox if expected, so the depositing worker isn't stuck.
+    if slice.b + 1 < nTotalBlocks:
+      let nextOwner = chunkOwner(slice.b + 1, task.nShards, task.chunkSize)
+      if nextOwner != task.shardIdx:
+        discard task.inboxes[].drain(task.shardIdx)
+
+  try: f.close() except IOError: discard
+  return 0
+
 proc scatter*(vcfPath: string; nShards: int; outputTemplate: string;
               nThreads: int = 1; forceScan: bool = false;
-              format: FileFormat = ffVcf; decompress: bool = false) =
+              format: FileFormat = ffVcf) =
   ## Split vcfPath into nShards bgzipped files.
   ## outputTemplate may contain {} (replaced with zero-padded shard number)
   ## or not (shard_NN. is prepended to the basename). mkdir -p is applied.
   ## nThreads controls parallelism; pass 0 to use all CPUs.
-  ## When decompress is true, shard files are written as uncompressed bytes (-Ou).
+  ## Output is always BGZF compressed.
   let actualThreads = if nThreads == 0: countProcessors() else: nThreads
   setMaxPoolSize(actualThreads)
   info(&"scatter: using {actualThreads} thread(s)")
@@ -685,7 +998,6 @@ proc scatter*(vcfPath: string; nShards: int; outputTemplate: string;
     if tasks[i].outFd < 0:
       stderr.writeLine &"error: could not create output file: {outPath}"
       quit(1)
-    tasks[i].decompress = decompress
     if verbose:
       let rs = tasks[i].rawStart; let re = tasks[i].rawEnd
       let bn = if i < nShards - 1: &", boundary head {tasks[i].boundaryHead.len} bytes"

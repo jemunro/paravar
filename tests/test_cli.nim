@@ -2,7 +2,7 @@
 ## Run from project root: nim c -r tests/test_cli.nim
 ## Requires the vcfparty binary to be built first (nimble build).
 
-import std/[os, osproc, sequtils, strformat, strutils]
+import std/[os, osproc, sequtils, strformat, strutils, tempfiles]
 
 const BinPath  = "./vcfparty"
 const DataDir  = "tests/data"
@@ -81,8 +81,7 @@ block testMissingO:
 # ---------------------------------------------------------------------------
 
 block testUnknownExtension:
-  let tmpDir = getTempDir() / "vcfparty_unknown_ext_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let tmpFile = tmpDir / "input.xyz"
   writeFile(tmpFile, "dummy")
   let (outp, code) = run(&"scatter -n 2 -o {tmpDir}/shard {tmpFile}")
@@ -97,8 +96,7 @@ block testUnknownExtension:
 
 block testBcfNoIndex:
   doAssert fileExists(SmallBcf), "BCF fixture missing — run generate_fixtures.sh"
-  let tmpDir = getTempDir() / "vcfparty_bcf_noindex_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let tmpBcf = tmpDir / "noindex.bcf"
   copyFile(SmallBcf, tmpBcf)
   # Intentionally omit .csi so BCF has no index.
@@ -113,8 +111,7 @@ block testBcfNoIndex:
 
 block testBcfRunForceScan:
   doAssert fileExists(SmallBcf), "BCF fixture missing — run generate_fixtures.sh"
-  let tmpDir = getTempDir() / "vcfparty_bcf_run_forcescan_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let (outp, code) = run(&"run -n 2 -o {tmpDir}/out.vcf.gz --force-scan {SmallBcf} --- cat")
   doAssert code != 0, "--force-scan with BCF via run should exit non-zero"
   doAssert "force-scan" in outp.toLowerAscii,
@@ -128,8 +125,7 @@ block testBcfRunForceScan:
 
 block testBcfForceScan:
   doAssert fileExists(SmallBcf), "BCF fixture missing — run generate_fixtures.sh"
-  let tmpDir = getTempDir() / "vcfparty_bcf_forcescan_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let (outp, code) = run(&"scatter -n 2 -o {tmpDir}/shard --force-scan {SmallBcf}")
   doAssert code != 0, "--force-scan with BCF should exit non-zero"
   doAssert "force-scan" in outp.toLowerAscii,
@@ -147,8 +143,7 @@ block testBcfForceScan:
 
 block testMissingIndex:
   # With no index, scatter should warn and fall back to BGZF scan automatically.
-  let tmpDir = getTempDir() / "vcfparty_noindex_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let tmpVcf = tmpDir / "noindex.vcf.gz"
   copyFile(SmallVcf, tmpVcf)
   let outp_template = tmpDir / "out.vcf.gz"
@@ -166,8 +161,7 @@ block testMissingIndex:
 # ---------------------------------------------------------------------------
 
 block testForceScanFlag:
-  let tmpDir = getTempDir() / "vcfparty_forcescan_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outp_template = tmpDir / "out.vcf.gz"
   let (runOutp, runCode) = run(&"scatter -n 4 -o {outp_template} --force-scan {SmallVcf}")
   doAssert runCode == 0, &"--force-scan exited non-zero:\n{runOutp}"
@@ -191,8 +185,7 @@ block testForceScanFlag:
 # ---------------------------------------------------------------------------
 
 block testEndToEnd:
-  let tmpDir = getTempDir() / "vcfparty_e2e_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outp_template = tmpDir / "out.vcf.gz"
 
   let (runOutp, runCode) = run(&"scatter -n 4 -o {outp_template} {SmallVcf}")
@@ -224,8 +217,7 @@ block testEndToEnd:
 
 block testCsiIndex:
   doAssert fileExists(CsiVcf), "CSI fixture missing — run generate_fixtures.sh"
-  let tmpDir = getTempDir() / "vcfparty_csi_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outp_template = tmpDir / "out.vcf.gz"
 
   let (runOutp, runCode) = run(&"scatter -n 4 -o {outp_template} {CsiVcf}")
@@ -255,8 +247,7 @@ block testCsiIndex:
 
 block testBcfExtension:
   doAssert fileExists(SmallBcf), "BCF fixture missing — run generate_fixtures.sh"
-  let tmpDir = getTempDir() / "vcfparty_bcf_ext_test"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outp_template = tmpDir / "out.bcf"
   let (outp, code) = run(&"scatter -n 4 -o {outp_template} {SmallBcf}")
   doAssert code == 0, &"BCF scatter exited non-zero:\n{outp}"
@@ -280,8 +271,7 @@ block testKg1000Genomes:
   if not fileExists(KgVcf):
     echo "SKIP CL13 1KG chr22: file not present (run tests/generate_fixtures.sh)"
   else:
-    let tmpDir = getTempDir() / "vcfparty_kg_test"
-    createDir(tmpDir)
+    let tmpDir = createTempDir("vcfparty_", "")
     let outp_template = tmpDir / "out.vcf.gz"
 
     let (runOutp, runCode) = run(&"scatter -n 10 -o {outp_template} {KgVcf}")
@@ -312,77 +302,7 @@ block testKg1000Genomes:
     removeDir(tmpDir)
 
 # ===========================================================================
-# CL14–CL17 — -i/--interleave and -s/--sequential flags
-# ===========================================================================
-
-# ---------------------------------------------------------------------------
-# CL14 — scatter -s: accepted as no-op, correct output
-# ---------------------------------------------------------------------------
-
-block testScatterSequentialFlag:
-  let tmpDir = getTempDir() / "vcfparty_cli_sequential_scatter"
-  createDir(tmpDir)
-  let (outp, code) = run(&"scatter -n 2 -s -o {tmpDir}/shard.vcf.gz {SmallVcf}")
-  doAssert code == 0, &"C14 scatter -s exited {code}:\n{outp}"
-  doAssert fileExists(tmpDir / "shard_1.shard.vcf.gz"), "C14: shard 1 missing"
-  doAssert fileExists(tmpDir / "shard_2.shard.vcf.gz"), "C14: shard 2 missing"
-  removeDir(tmpDir)
-  echo "PASS CL14 scatter -s: accepted, shards produced"
-
-# ---------------------------------------------------------------------------
-# CL15 — scatter -i: warning emitted, sequential fallback, correct output
-# ---------------------------------------------------------------------------
-
-block testScatterInterleaveFlag:
-  let tmpDir = getTempDir() / "vcfparty_cli_interleave_scatter"
-  createDir(tmpDir)
-  let (outp, code) = run(&"scatter -n 2 -i -o {tmpDir}/shard.vcf.gz {SmallVcf}")
-  doAssert code == 0, &"C15 scatter -i exited {code}:\n{outp}"
-  doAssert "not yet implemented" in outp.toLowerAscii or "interleave" in outp.toLowerAscii,
-    &"C15: expected interleave warning, got: {outp}"
-  doAssert fileExists(tmpDir / "shard_1.shard.vcf.gz"), "C15: shard 1 missing"
-  doAssert fileExists(tmpDir / "shard_2.shard.vcf.gz"), "C15: shard 2 missing"
-  removeDir(tmpDir)
-  echo "PASS CL15 scatter -i: warning emitted, sequential fallback, shards produced"
-
-# ---------------------------------------------------------------------------
-# CL16 — run -s: accepted as no-op, correct output
-# ---------------------------------------------------------------------------
-
-block testRunSequentialFlag:
-  let tmpDir = getTempDir() / "vcfparty_cli_sequential_run"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf.gz"
-  let (outp, code) = run(
-    &"run -n 2 -s -o {outFile} {SmallVcf} ::: bcftools view -Oz +concat+")
-  doAssert code == 0, &"C16 run -s exited {code}:\n{outp}"
-  doAssert fileExists(outFile), "C16: output missing"
-  let (cntOut, _) = execCmdEx("bcftools view -HG " & outFile & " 2>/dev/null | wc -l")
-  doAssert cntOut.strip.parseInt > 0, "C16: output has no records"
-  removeDir(tmpDir)
-  echo "PASS CL16 run -s: accepted, output produced"
-
-# ---------------------------------------------------------------------------
-# CL17 — run -i: warning emitted, sequential fallback, correct output
-# ---------------------------------------------------------------------------
-
-block testRunInterleaveFlag:
-  let tmpDir = getTempDir() / "vcfparty_cli_interleave_run"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf.gz"
-  let (outp, code) = run(
-    &"run -n 2 -i -o {outFile} {SmallVcf} ::: bcftools view -Oz +concat+")
-  doAssert code == 0, &"C17 run -i exited {code}:\n{outp}"
-  doAssert "not yet implemented" in outp.toLowerAscii or "interleave" in outp.toLowerAscii,
-    &"C17: expected interleave warning, got: {outp}"
-  doAssert fileExists(outFile), "C17: output missing"
-  let (cntOut, _) = execCmdEx("bcftools view -HG " & outFile & " 2>/dev/null | wc -l")
-  doAssert cntOut.strip.parseInt > 0, "C17: output has no records"
-  removeDir(tmpDir)
-  echo "PASS CL17 run -i: warning emitted, sequential fallback, output produced"
-
-# ===========================================================================
-# CL18–CL21 — -O output format flag
+# CL30 — -u flag (force uncompressed output)
 # ===========================================================================
 
 proc isBgzf(path: string): bool =
@@ -393,260 +313,57 @@ proc isBgzf(path: string): bool =
   b[0] == 0x1f'u8 and b[1] == 0x8b'u8
 
 # ---------------------------------------------------------------------------
-# CL18 — run -Oz: BGZF output, records intact
+# CL30.1 — run -u +concat+: output is uncompressed despite .vcf.gz extension
 # ---------------------------------------------------------------------------
 
-block testRunOutputFmtBgzf:
-  let tmpDir = getTempDir() / "vcfparty_cli_O_bgzf"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf.gz"
-  let (outp, code) = run(&"run -n 2 -Oz -o {outFile} {SmallVcf} ::: cat +concat+")
-  doAssert code == 0, &"C18 run -Oz exited {code}:\n{outp}"
-  doAssert fileExists(outFile), "C18: output file missing"
-  let (cnt, _) = execCmdEx("bcftools view -HG " & outFile & " 2>/dev/null | wc -l")
-  doAssert cnt.strip.parseInt > 0, "C18: output has no records"
-  removeDir(tmpDir)
-  echo "PASS CL18 run -Oz: VCF BGZF output, records intact"
-
-# ---------------------------------------------------------------------------
-# CL19 — run -Ov: VCF uncompressed output
-# ---------------------------------------------------------------------------
-
-block testRunOutputFmtVcfUncomp:
-  let tmpDir = getTempDir() / "vcfparty_cli_O_vcf"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf"
-  let (outp, code) = run(&"run -n 2 -Ov -o {outFile} {SmallVcf} ::: cat +concat+")
-  doAssert code == 0, &"C19 run -Ov exited {code}:\n{outp}"
-  doAssert fileExists(outFile), "C19: output file missing"
-  doAssert not isBgzf(outFile), "C19: output should not be BGZF-compressed"
-  let (cnt, _) = execCmdEx("grep -c '^[^#]' " & outFile & " 2>/dev/null || true")
-  doAssert cnt.strip.parseInt > 0, "C19: output has no records"
-  removeDir(tmpDir)
-  echo "PASS CL19 run -Ov: VCF uncompressed output"
-
-# ---------------------------------------------------------------------------
-# CL20 — run -Ob with VCF input: exits non-zero (sniff mismatch: BCF flag, VCF input)
-# ---------------------------------------------------------------------------
-
-block testRunOutputFmtBcfMismatch:
-  let tmpDir = getTempDir() / "vcfparty_cli_c20_ob"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.bcf"
-  # Pipeline outputs VCF but -Ob expects BCF → runtime sniff mismatch in interceptor.
-  let (outp, code) = run(&"run -n 2 -Ob -o {outFile} {SmallVcf} ::: cat +concat+")
-  doAssert code != 0, &"C20: -Ob with VCF input should exit non-zero, got {code}"
-  doAssert "pipeline" in outp or "format conversion" in outp or "VCF" in outp or "BCF" in outp,
-    &"C20: expected format mismatch error, got:\n{outp}"
-  removeDir(tmpDir)
-  echo "PASS CL20 run -Ob VCF input: exits non-zero (format sniff mismatch)"
-
-# ---------------------------------------------------------------------------
-# CL21 — run -Ov with VCF input: exits 0 and produces uncompressed VCF output
-# ---------------------------------------------------------------------------
-
-block testRunOutputFmtVcfUncompressed:
-  let tmpDir = getTempDir() / "vcfparty_cli_c21_ov"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf"
-  let (outp, code) = run(&"run -n 2 -Ov -o {outFile} {SmallVcf} ::: cat +concat+")
-  doAssert code == 0, &"C21 run -Ov exited {code}:\n{outp}"
-  doAssert fileExists(outFile), "C21: output file missing"
-  doAssert not isBgzf(outFile), "C21: output should not be BGZF"
-  let (cnt, _) = execCmdEx("grep -c '^[^#]' " & outFile & " 2>/dev/null || true")
-  doAssert cnt.strip.parseInt > 0, "C21: output has no records"
-  removeDir(tmpDir)
-  echo "PASS CL21 run -Ov: VCF uncompressed output, records intact"
-
-# ===========================================================================
-# CL26 — scatter -Oz/-Ou and gather -Oz/-Ou
-# ===========================================================================
-
-# ---------------------------------------------------------------------------
-# CL26.1 — scatter -Oz: shard files are BGZF
-# ---------------------------------------------------------------------------
-
-block testScatterOz:
-  let tmpDir = getTempDir() / "vcfparty_cli_scatter_oz"
-  createDir(tmpDir)
-  let (outp, code) = run(&"scatter -n 2 -Oz -o {tmpDir}/shard.vcf.gz {SmallVcf}")
-  doAssert code == 0, &"C26.1 scatter -Oz exited {code}:\n{outp}"
-  doAssert isBgzf(tmpDir / "shard_1.shard.vcf.gz"), "C26.1: shard 1 not BGZF"
-  doAssert isBgzf(tmpDir / "shard_2.shard.vcf.gz"), "C26.1: shard 2 not BGZF"
-  removeDir(tmpDir)
-  echo "PASS CL26.1 scatter -Oz: BGZF shard files produced"
-
-# ---------------------------------------------------------------------------
-# CL26.2 — scatter -Ov: shard files are uncompressed VCF
-# ---------------------------------------------------------------------------
-
-block testScatterOv:
-  let tmpDir = getTempDir() / "vcfparty_cli_scatter_ov"
-  createDir(tmpDir)
-  let (outp, code) = run(&"scatter -n 2 -Ov -o {tmpDir}/shard.vcf {SmallVcf}")
-  doAssert code == 0, &"C26.2 scatter -Ov exited {code}:\n{outp}"
-  doAssert not isBgzf(tmpDir / "shard_1.shard.vcf"), "C26.2: shard 1 should not be BGZF"
-  doAssert not isBgzf(tmpDir / "shard_2.shard.vcf"), "C26.2: shard 2 should not be BGZF"
-  removeDir(tmpDir)
-  echo "PASS CL26.2 scatter -Ov: uncompressed VCF shard files produced"
-
-# ---------------------------------------------------------------------------
-# CL26.3 — scatter -Oz -Oz (duplicate): exits non-zero
-# ---------------------------------------------------------------------------
-
-block testScatterOzDuplicate:
-  let (outp, code) = run(&"scatter -n 2 -Oz -Oz -o /tmp/ignored_c26_3 {SmallVcf}")
-  doAssert code != 0, &"C26.3: duplicate -Oz should exit non-zero, got {code}"
-  doAssert "only one" in outp or "allowed" in outp,
-    &"C26.3: expected 'only one' in error, got:\n{outp}"
-  echo "PASS CL26.3 scatter duplicate -O: exits non-zero"
-
-# ---------------------------------------------------------------------------
-# CL26.4 — scatter extension inference: .vcf.gz → BGZF, .vcf → uncompressed
-# ---------------------------------------------------------------------------
-
-block testScatterExtInfer:
-  let d1 = getTempDir() / "vcfparty_cli_scatter_ext_bgzf"
-  createDir(d1)
-  let (o1, c1) = run(&"scatter -n 2 -o {d1}/shard.vcf.gz {SmallVcf}")
-  doAssert c1 == 0, &"C26.4a scatter .vcf.gz exited {c1}:\n{o1}"
-  doAssert isBgzf(d1 / "shard_1.shard.vcf.gz"), "C26.4a: shard 1 not BGZF"
-  removeDir(d1)
-  let d2 = getTempDir() / "vcfparty_cli_scatter_ext_plain"
-  createDir(d2)
-  let (o2, c2) = run(&"scatter -n 2 -o {d2}/shard.vcf {SmallVcf}")
-  doAssert c2 == 0, &"C26.4b scatter .vcf exited {c2}:\n{o2}"
-  doAssert not isBgzf(d2 / "shard_1.shard.vcf"), "C26.4b: shard 1 should not be BGZF"
-  removeDir(d2)
-  echo "PASS CL26.4 scatter extension inference: .vcf.gz→BGZF, .vcf→uncompressed"
-
-# ---------------------------------------------------------------------------
-# CL26.5 — run -Oz -Oz (duplicate): exits non-zero
-# ---------------------------------------------------------------------------
-
-block testRunOzDuplicate:
-  let (outp, code) = run(&"run -n 2 -Oz -Oz -o /tmp/ignored_c26_5 {SmallVcf} ::: cat +concat+")
-  doAssert code != 0, &"C26.5: duplicate -Oz should exit non-zero, got {code}"
-  doAssert "only one" in outp or "allowed" in outp,
-    &"C26.5: expected 'only one' in error, got:\n{outp}"
-  echo "PASS CL26.5 run duplicate -O: exits non-zero"
-
-# ---------------------------------------------------------------------------
-# CL26.6 — gather -Oz: output is BGZF
-# ---------------------------------------------------------------------------
-
-block testGatherOz:
-  # First scatter, then gather with -Oz
-  let scatterDir = getTempDir() / "vcfparty_cli_gather_oz_scatter"
-  createDir(scatterDir)
-  let (so, sc) = run(&"scatter -n 2 -o {scatterDir}/shard.vcf.gz {SmallVcf}")
-  doAssert sc == 0, &"C26.6 scatter exited {sc}:\n{so}"
-  let outFile = scatterDir / "gathered.vcf.gz"
-  let shards = scatterDir / "shard_1.shard.vcf.gz " & scatterDir / "shard_2.shard.vcf.gz"
-  let (go, gc) = run(&"gather -Oz -o {outFile} {shards}")
-  doAssert gc == 0, &"C26.6 gather -Oz exited {gc}:\n{go}"
-  doAssert isBgzf(outFile), "C26.6: output should be BGZF"
-  let (cnt, _) = execCmdEx("bcftools view -HG " & outFile & " 2>/dev/null | wc -l")
-  doAssert cnt.strip.parseInt > 0, "C26.6: output has no records"
-  removeDir(scatterDir)
-  echo "PASS CL26.6 gather -Oz: BGZF output, records intact"
-
-# ---------------------------------------------------------------------------
-# CL26.7 — gather -Ov: output is uncompressed VCF
-# ---------------------------------------------------------------------------
-
-block testGatherOv:
-  let scatterDir = getTempDir() / "vcfparty_cli_gather_ov_scatter"
-  createDir(scatterDir)
-  let (so, sc) = run(&"scatter -n 2 -o {scatterDir}/shard.vcf.gz {SmallVcf}")
-  doAssert sc == 0, &"C26.7 scatter exited {sc}:\n{so}"
-  let outFile = scatterDir / "gathered.vcf"
-  let shards = scatterDir / "shard_1.shard.vcf.gz " & scatterDir / "shard_2.shard.vcf.gz"
-  let (go, gc) = run(&"gather -Ov -o {outFile} {shards}")
-  doAssert gc == 0, &"C26.7 gather -Ov exited {gc}:\n{go}"
-  doAssert not isBgzf(outFile), "C26.7: output should not be BGZF"
-  removeDir(scatterDir)
-  echo "PASS CL26.7 gather -Ov: uncompressed VCF output"
-
-# ---------------------------------------------------------------------------
-# CL26.8 — gather -Oz -Oz (duplicate): exits non-zero
-# ---------------------------------------------------------------------------
-
-block testGatherOzDuplicate:
-  let (outp, code) = run("gather -Oz -Oz -o /tmp/ignored_c26_8 /dev/null")
-  doAssert code != 0, &"C26.8: duplicate -Oz should exit non-zero, got {code}"
-  doAssert "only one" in outp or "allowed" in outp,
-    &"C26.8: expected 'only one' in error, got:\n{outp}"
-  echo "PASS CL26.8 gather duplicate -O: exits non-zero"
-
-# ===========================================================================
-# CL22–CL25 — -d/--decompress retired; -Iu added to run
-# ===========================================================================
-
-# ---------------------------------------------------------------------------
-# CL22 — scatter -d exits non-zero with helpful error message
-# ---------------------------------------------------------------------------
-
-block testScatterDecompressRetired:
-  let (outp, code) = run(&"scatter -n 2 -d -o /tmp/ignored {SmallVcf}")
-  doAssert code != 0, &"C22: scatter -d should exit non-zero but got {code}"
-  doAssert "retired" in outp or "-Ou" in outp,
-    &"C22: expected helpful error mentioning -Ou, got:\n{outp}"
-  echo "PASS CL22 scatter -d: exits non-zero with helpful error"
-
-# ---------------------------------------------------------------------------
-# CL23 — scatter --decompress exits non-zero with helpful error message
-# ---------------------------------------------------------------------------
-
-block testScatterDecompressLongRetired:
-  let (outp, code) = run(&"scatter -n 2 --decompress -o /tmp/ignored {SmallVcf}")
-  doAssert code != 0, &"C23: scatter --decompress should exit non-zero but got {code}"
-  doAssert "retired" in outp or "-Ou" in outp,
-    &"C23: expected helpful error mentioning -Ou, got:\n{outp}"
-  echo "PASS CL23 scatter --decompress: exits non-zero with helpful error"
-
-# ---------------------------------------------------------------------------
-# CL24 — run -Pv ... +collect+: all records present in output (VCF uncompressed piped)
-# ---------------------------------------------------------------------------
-
-block testRunPipeTypeVcfCollect:
-  let tmpDir = getTempDir() / "vcfparty_cli_pv_collect"
-  createDir(tmpDir)
+block testRunUncompressConcat:
+  let tmpDir = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf.gz"
   let (outp, code) = run(
-    &"run -n 2 -Pv -o {outFile} {SmallVcf} ::: bcftools view -Oz +collect+")
-  doAssert code == 0, &"C24 run -Pv +collect+ exited {code}:\n{outp}"
-  doAssert fileExists(outFile), "C24: output missing"
-  let (origCnt, _) = execCmdEx("bcftools view -HG " & SmallVcf & " 2>/dev/null | wc -l")
-  let (outCnt, _)  = execCmdEx("bcftools view -HG " & outFile  & " 2>/dev/null | wc -l")
-  doAssert origCnt.strip == outCnt.strip,
-    &"C24: record count mismatch: orig={origCnt.strip} out={outCnt.strip}"
+    &"run -n 2 -u -o {outFile} {SmallVcf} ::: cat +concat+")
+  doAssert code == 0, &"CL30.1 run -u +concat+ exited {code}:\n{outp}"
+  doAssert fileExists(outFile), "CL30.1: output missing"
+  doAssert not isBgzf(outFile), "CL30.1: output should be uncompressed despite .vcf.gz extension"
+  doAssert "warning" in outp.toLowerAscii,
+    &"CL30.1: expected extension mismatch warning, got:\n{outp}"
   removeDir(tmpDir)
-  echo "PASS CL24 run -Pv +collect+: all records present"
+  echo "PASS CL30.1 run -u +concat+: uncompressed output, warning emitted"
 
 # ---------------------------------------------------------------------------
-# CL25 — run -d exits non-zero with helpful error message
+# CL30.2 — run -u with {}: exits non-zero
 # ---------------------------------------------------------------------------
 
-block testRunDecompressRetired:
+block testRunUncompressBraceError:
   let (outp, code) = run(
-    &"run -n 2 -d -o /tmp/ignored {SmallVcf} ::: bcftools view -Oz +collect+")
-  doAssert code != 0, &"C25: run -d should exit non-zero but got {code}"
-  doAssert "retired" in outp or "-Pv" in outp or "-Pu" in outp or "-P" in outp,
-    &"C25: expected helpful error mentioning -Pv/-Pu, got:\n{outp}"
-  echo "PASS CL25 run -d: exits non-zero with helpful error"
+    &"run -n 2 -u {SmallVcf} ::: cat -o out.{{}}.vcf.gz")
+  doAssert code != 0, &"CL30.2: -u with {{}} should exit non-zero, got {code}"
+  doAssert "tool-managed" in outp.toLowerAscii or "{}" in outp,
+    &"CL30.2: expected tool-managed error, got:\n{outp}"
+  echo "PASS CL30.2 run -u with {}: exits non-zero"
+
+# ---------------------------------------------------------------------------
+# CL30.3 — run -u +concat+ with .vcf extension: no warning, uncompressed
+# ---------------------------------------------------------------------------
+
+block testRunUncompressConcatVcfExt:
+  let tmpDir = createTempDir("vcfparty_", "")
+  let outFile = tmpDir / "out.vcf"
+  let (outp, code) = run(
+    &"run -n 2 -u -o {outFile} {SmallVcf} ::: cat +concat+")
+  doAssert code == 0, &"CL30.3 run -u +concat+ .vcf exited {code}:\n{outp}"
+  doAssert fileExists(outFile), "CL30.3: output missing"
+  doAssert not isBgzf(outFile), "CL30.3: output should be uncompressed"
+  let cnt = execCmdEx("grep -c '^[^#]' " & outFile & " 2>/dev/null || true")[0].strip.parseInt
+  doAssert cnt > 0, "CL30.3: output has no records"
+  removeDir(tmpDir)
+  echo "PASS CL30.3 run -u +concat+ .vcf: uncompressed, no warning"
 
 # ===========================================================================
 # CL27 — +merge+ basic integration
 # ===========================================================================
 
-# ---------------------------------------------------------------------------
-# CL27 — +merge+: exits zero, output contains all records
-# ---------------------------------------------------------------------------
-
 block testMergeBasic:
-  let tmpDir  = getTempDir() / "vcfparty_cli_merge_op"
-  createDir(tmpDir)
+  let tmpDir  = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
   let (outp, code) = run(
     &"run -n 2 -o {outFile} {SmallVcf} ::: bcftools view -Ov +merge+")
@@ -676,8 +393,7 @@ block testMergeBasic:
 # shard i+1 is forked, maximising the chance of the race being triggered.
 
 block testConcatFdInheritance:
-  let tmpDir  = getTempDir() / "vcfparty_cli_c28_fdinherit"
-  createDir(tmpDir)
+  let tmpDir  = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf.gz"
   # 4 shards, slow subprocess: sleep then cat (passes data through unchanged).
   let (outp, code) = run(
@@ -694,175 +410,5 @@ block testConcatFdInheritance:
   removeDir(tmpDir)
   echo &"PASS CL28 +concat+ fd-inheritance: 4 shards, slow subprocess, {outCnt} records"
 
-# ===========================================================================
-# CL29 — -P/--pipe-type and -O/--output-type full letter table
-# ===========================================================================
 
-# ---------------------------------------------------------------------------
-# CL29.1 — run -Pv with VCF input: exits 0, records intact
-# ---------------------------------------------------------------------------
-
-block testPipeTypeVcfUncompress:
-  let tmpDir  = getTempDir() / "vcfparty_cli_c29_1"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf.gz"
-  let (outp, code) = run(
-    &"run -n 2 -Pv -o {outFile} {SmallVcf} ::: bcftools view -Oz +collect+")
-  doAssert code == 0, &"C29.1 run -Pv exited {code}:\n{outp}"
-  let (origCnt, _) = execCmdEx("bcftools view -HG " & SmallVcf & " 2>/dev/null | wc -l")
-  let (outCnt, _)  = execCmdEx("bcftools view -HG " & outFile  & " 2>/dev/null | wc -l")
-  doAssert origCnt.strip == outCnt.strip, &"C29.1: record count mismatch"
-  removeDir(tmpDir)
-  echo "PASS CL29.1 run -Pv VCF input: exits 0, records intact"
-
-# ---------------------------------------------------------------------------
-# CL29.2 — run -Pv with BCF input: exits non-zero (sniff mismatch)
-# ---------------------------------------------------------------------------
-
-block testPipeTypeVcfWithBcfInput:
-  let tmpDir = getTempDir() / "vcfparty_cli_c29_2"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf.gz"
-  let (outp, code) = run(
-    &"run -n 2 -Pv -o {outFile} {SmallBcf} ::: bcftools view -Oz +collect+")
-  doAssert code != 0, &"C29.2: -Pv with BCF input should exit non-zero, got {code}"
-  doAssert "BCF" in outp or "format conversion" in outp or "pipeline" in outp,
-    &"C29.2: expected format mismatch error, got:\n{outp}"
-  removeDir(tmpDir)
-  echo "PASS CL29.2 run -Pv BCF input: exits non-zero (sniff mismatch)"
-
-# ---------------------------------------------------------------------------
-# CL29.3 — run -Pb with BCF input: exits 0 (raw BGZF piped)
-# ---------------------------------------------------------------------------
-
-block testPipeTypeBcfBgzf:
-  let tmpDir  = getTempDir() / "vcfparty_cli_c29_3"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf.gz"
-  let (outp, code) = run(
-    &"run -n 2 -Pb -o {outFile} {SmallBcf} ::: bcftools view -Oz +collect+")
-  doAssert code == 0, &"C29.3 run -Pb BCF input exited {code}:\n{outp}"
-  let (origCnt, _) = execCmdEx("bcftools view -HG " & SmallBcf & " 2>/dev/null | wc -l")
-  let (outCnt, _)  = execCmdEx("bcftools view -HG " & outFile  & " 2>/dev/null | wc -l")
-  doAssert origCnt.strip == outCnt.strip, &"C29.3: record count mismatch"
-  removeDir(tmpDir)
-  echo "PASS CL29.3 run -Pb BCF input: exits 0 (raw BGZF piped), records intact"
-
-# ---------------------------------------------------------------------------
-# CL29.4 — run -Pz with VCF input: exits 0 (raw BGZF piped)
-# ---------------------------------------------------------------------------
-
-block testPipeTypeVcfBgzf:
-  let tmpDir  = getTempDir() / "vcfparty_cli_c29_4"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf.gz"
-  let (outp, code) = run(
-    &"run -n 2 -Pz -o {outFile} {SmallVcf} ::: bcftools view -Oz +collect+")
-  doAssert code == 0, &"C29.4 run -Pz VCF input exited {code}:\n{outp}"
-  let (origCnt, _) = execCmdEx("bcftools view -HG " & SmallVcf & " 2>/dev/null | wc -l")
-  let (outCnt, _)  = execCmdEx("bcftools view -HG " & outFile  & " 2>/dev/null | wc -l")
-  doAssert origCnt.strip == outCnt.strip, &"C29.4: record count mismatch"
-  removeDir(tmpDir)
-  echo "PASS CL29.4 run -Pz VCF input: exits 0 (raw BGZF piped), records intact"
-
-# ---------------------------------------------------------------------------
-# CL29.5 — run -Pu with BCF input: exits 0 (BCF uncompressed piped)
-# ---------------------------------------------------------------------------
-
-block testPipeTypeBcfUncompress:
-  let tmpDir  = getTempDir() / "vcfparty_cli_c29_5"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf.gz"
-  let (outp, code) = run(
-    &"run -n 2 -Pu -o {outFile} {SmallBcf} ::: bcftools view -Oz +collect+")
-  doAssert code == 0, &"C29.5 run -Pu BCF input exited {code}:\n{outp}"
-  let (origCnt, _) = execCmdEx("bcftools view -HG " & SmallBcf & " 2>/dev/null | wc -l")
-  let (outCnt, _)  = execCmdEx("bcftools view -HG " & outFile  & " 2>/dev/null | wc -l")
-  doAssert origCnt.strip == outCnt.strip, &"C29.5: record count mismatch"
-  removeDir(tmpDir)
-  echo "PASS CL29.5 run -Pu BCF input: exits 0 (BCF uncompressed piped), records intact"
-
-# ---------------------------------------------------------------------------
-# CL29.6 — run -Px unknown letter: exits non-zero
-# ---------------------------------------------------------------------------
-
-block testPipeTypeUnknownLetter:
-  let (outp, code) = run(
-    &"run -n 2 -Px -o /tmp/ignored_c29_6 {SmallVcf} ::: cat +collect+")
-  doAssert code != 0, &"C29.6: -Px should exit non-zero, got {code}"
-  doAssert "accepted" in outp or "letter" in outp or "z" in outp,
-    &"C29.6: expected letter error, got:\n{outp}"
-  echo "PASS CL29.6 run -Px: exits non-zero (unknown letter)"
-
-# ---------------------------------------------------------------------------
-# CL29.7 — run -Iu exits non-zero with retired hint
-# ---------------------------------------------------------------------------
-
-block testInputUncompressRetiredHint:
-  let (outp, code) = run(
-    &"run -n 2 -Iu -o /tmp/ignored_c29_7 {SmallVcf} ::: cat +collect+")
-  doAssert code != 0, &"C29.7: -Iu should exit non-zero, got {code}"
-  doAssert "retired" in outp or "-P" in outp,
-    &"C29.7: expected retired hint, got:\n{outp}"
-  echo "PASS CL29.7 run -Iu: exits non-zero with retired hint"
-
-# ---------------------------------------------------------------------------
-# CL29.8 — scatter -Ob with VCF input: exits non-zero (sniff mismatch)
-# ---------------------------------------------------------------------------
-
-block testScatterObVcfInput:
-  let (outp, code) = run(&"scatter -n 2 -Ob -o /tmp/ignored_c29_8 {SmallVcf}")
-  doAssert code != 0, &"C29.8: scatter -Ob with VCF input should exit non-zero, got {code}"
-  doAssert "VCF" in outp or "format conversion" in outp or "pipeline" in outp,
-    &"C29.8: expected format mismatch error, got:\n{outp}"
-  echo "PASS CL29.8 scatter -Ob VCF input: exits non-zero (sniff mismatch)"
-
-# ---------------------------------------------------------------------------
-# CL29.9 — scatter -Ov with BCF input: exits non-zero (sniff mismatch)
-# ---------------------------------------------------------------------------
-
-block testScatterOvBcfInput:
-  let (outp, code) = run(&"scatter -n 2 -Ov -o /tmp/ignored_c29_9 {SmallBcf}")
-  doAssert code != 0, &"C29.9: scatter -Ov with BCF input should exit non-zero, got {code}"
-  doAssert "BCF" in outp or "format conversion" in outp or "pipeline" in outp,
-    &"C29.9: expected format mismatch error, got:\n{outp}"
-  echo "PASS CL29.9 scatter -Ov BCF input: exits non-zero (sniff mismatch)"
-
-# ---------------------------------------------------------------------------
-# CL29.10 — -O z (space-separated) and --output-type z (long form): exits 0
-# ---------------------------------------------------------------------------
-
-block testOutputTypeLongAndSpaceForms:
-  let tmpDir  = getTempDir() / "vcfparty_cli_c29_10"
-  createDir(tmpDir)
-  let outFile1 = tmpDir / "out1.vcf.gz"
-  let outFile2 = tmpDir / "out2.vcf.gz"
-  # Space-separated: -O z
-  let (o1, c1) = run(&"run -n 2 -O z -o {outFile1} {SmallVcf} ::: cat +concat+")
-  doAssert c1 == 0, &"C29.10a run -O z exited {c1}:\n{o1}"
-  doAssert fileExists(outFile1), "C29.10a: output missing"
-  # Long form: --output-type z
-  let (o2, c2) = run(&"run -n 2 --output-type z -o {outFile2} {SmallVcf} ::: cat +concat+")
-  doAssert c2 == 0, &"C29.10b run --output-type z exited {c2}:\n{o2}"
-  doAssert fileExists(outFile2), "C29.10b: output missing"
-  removeDir(tmpDir)
-  echo "PASS CL29.10 -O z and --output-type z: exits 0"
-
-# ---------------------------------------------------------------------------
-# CL29.11 — --pipe-type v (long form): exits 0, records intact
-# ---------------------------------------------------------------------------
-
-block testPipeTypeLongForm:
-  let tmpDir  = getTempDir() / "vcfparty_cli_c29_11"
-  createDir(tmpDir)
-  let outFile = tmpDir / "out.vcf.gz"
-  let (outp, code) = run(
-    &"run -n 2 --pipe-type v -o {outFile} {SmallVcf} ::: bcftools view -Oz +collect+")
-  doAssert code == 0, &"C29.11 --pipe-type v exited {code}:\n{outp}"
-  doAssert fileExists(outFile), "C29.11: output missing"
-  let (origCnt, _) = execCmdEx("bcftools view -HG " & SmallVcf & " 2>/dev/null | wc -l")
-  let (outCnt, _)  = execCmdEx("bcftools view -HG " & outFile  & " 2>/dev/null | wc -l")
-  doAssert origCnt.strip == outCnt.strip, &"C29.11: record count mismatch"
-  removeDir(tmpDir)
-  echo "PASS CL29.11 --pipe-type v: exits 0, records intact"
 

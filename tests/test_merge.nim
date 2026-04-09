@@ -2,7 +2,7 @@
 ## Run from project root: nim c -r tests/test_merge.nim
 ## Requires: tests/data/small.vcf.gz, tests/data/small.bcf
 
-import std/[os, osproc, strformat, strutils, sequtils]
+import std/[os, osproc, sequtils, strformat, strutils, tempfiles]
 
 const DataDir  = "tests/data"
 const SmallVcf = DataDir / "small.vcf.gz"
@@ -68,8 +68,7 @@ proc isSortedVcf(path: string): bool =
 # ---------------------------------------------------------------------------
 block testMergeVcf4Shards:
   doAssert fileExists(SmallVcf), &"VCF fixture missing: {SmallVcf}"
-  let tmpDir = getTempDir() / "vcfparty_merge_m5_vcf4"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
   let (outp, code) = runBin(
     &"-n 4 -o {outFile} {SmallVcf} ::: bcftools view -Ov +merge+")
@@ -91,8 +90,7 @@ block testMergeVcf4Shards:
 # ---------------------------------------------------------------------------
 block testMergeBcfCat:
   doAssert fileExists(SmallBcf), &"BCF fixture missing: {SmallBcf}"
-  let tmpDir = getTempDir() / "vcfparty_merge_m5_bcfcat"
-  createDir(tmpDir)
+  let tmpDir = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
   # Use bcftools view -Ov so the subprocess outputs uncompressed VCF,
   # which +merge+ can read as VCF records (simpler than raw BCF output).
@@ -114,8 +112,7 @@ block testMergeBcfCat:
 # ---------------------------------------------------------------------------
 block testMergeStdout:
   doAssert fileExists(SmallVcf), &"VCF fixture missing: {SmallVcf}"
-  let tmpDir  = getTempDir() / "vcfparty_merge_m5_stdout"
-  createDir(tmpDir)
+  let tmpDir  = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
   # Redirect stdout to outFile; stderr (warnings) go to /dev/null.
   let (_, code) = execCmdEx(
@@ -133,25 +130,24 @@ block testMergeStdout:
   echo &"PASS MG3 +merge+ stdout: {outCount} records, sorted"
 
 # ---------------------------------------------------------------------------
-# MG4 — BGZF pipeline (cat): warning triggered, records present
+# MG4 — cat pipeline (pipes always decompress): no BGZF warning, records correct
 # ---------------------------------------------------------------------------
-block testMergeBgzfWarning:
+block testMergeCatPipeline:
   doAssert fileExists(SmallVcf), &"VCF fixture missing: {SmallVcf}"
-  let tmpDir  = getTempDir() / "vcfparty_merge_m5_bgzfwarn"
-  createDir(tmpDir)
+  let tmpDir  = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
-  # cat passes BGZF bytes unchanged → feeder decompresses and warns.
+  # Pipes always decompress now, so cat receives plain VCF text — no BGZF warning.
   let (outp, code) = runBin(
     &"-n 4 -o {outFile} {SmallVcf} ::: cat +merge+")
-  doAssert code == 0, &"MG4: BGZF cat +merge+ exited {code}:\n{outp}"
-  doAssert "works best with uncompressed" in outp,
-    &"MG4: expected BGZF warning in output, got:\n{outp}"
+  doAssert code == 0, &"MG4: cat +merge+ exited {code}:\n{outp}"
+  doAssert "works best with uncompressed" notin outp,
+    &"MG4: unexpected BGZF warning (pipes decompress now):\n{outp}"
   doAssert fileExists(outFile), "MG4: output file missing"
   let (bco, _) = execCmdEx("bcftools view -H " & SmallVcf & " 2>/dev/null | wc -l")
   let origCount = bco.strip.parseInt
   let outCount  = vcfRecordCount(outFile)
   doAssert outCount == origCount,
-    &"MG4: BGZF cat record count: got {outCount}, expected {origCount}"
+    &"MG4: cat record count: got {outCount}, expected {origCount}"
   removeDir(tmpDir)
-  echo &"PASS MG4 +merge+ BGZF pipeline: warning emitted, {outCount} records present"
+  echo &"PASS MG4 +merge+ cat pipeline: {outCount} records present (no BGZF warning)"
 

@@ -6,7 +6,7 @@
 ##   3. Mode inference from -o / {} flags.
 ##   4. Executing per-shard pipelines concurrently (all N shards run at once).
 
-import std/[cpuinfo, os, posix, sequtils, strformat, strutils]
+import std/[algorithm, cpuinfo, os, posix, sequtils, strformat, strutils]
 {.warning[Deprecated]: off.}
 import std/threadpool
 {.warning[Deprecated]: on.}
@@ -234,7 +234,7 @@ proc waitOne(running: var seq[InFlight]; failed: var bool) =
 proc runShards*(vcfPath: string; nShards: int; outputTemplate: string;
                 nThreads: int; forceScan: bool;
                 stages: seq[seq[string]]; noKill: bool = false;
-                toolManaged: bool = false; inputUncompress: bool = false) =
+                toolManaged: bool = false) =
   ## Scatter vcfPath into nShards shards and pipe each through the tool pipeline.
   ## outputTemplate may contain {} or use shard_NN. prefix naming.
   ## All N shards run concurrently. On failure, siblings are killed (SIGTERM)
@@ -243,7 +243,7 @@ proc runShards*(vcfPath: string; nShards: int; outputTemplate: string;
   ## When toolManaged is true, shard stdout is discarded (/dev/null); the tool
   ## is expected to write its own output files using {} in the command.
   let actualThreads = if nThreads == 0: countProcessors() else: nThreads
-  setMaxPoolSize(max(actualThreads, nShards))
+  setMaxPoolSize(nShards * 2)
   let fmt      = if vcfPath.endsWith(".bcf"): ffBcf else: ffVcf
   let tasks    = computeShards(vcfPath, nShards, actualThreads, forceScan, fmt)
   var anyFailed = false
@@ -285,7 +285,7 @@ proc runShards*(vcfPath: string; nShards: int; outputTemplate: string;
     # Assign pipe write-end to the shard task and spawn the writer thread.
     var task = tasks[i]
     task.outFd = pipeFds[1]
-    task.decompress = inputUncompress
+    task.decompress = true
     let writeFv = spawn doWriteShard(task)
     inFlight.add(InFlight(pid: pid, writeFv: writeFv, shardIdx: i))
   # On failure without --no-kill: terminate all remaining children, then reap.
@@ -302,15 +302,14 @@ proc runShards*(vcfPath: string; nShards: int; outputTemplate: string;
 
 proc runShardsGather*(vcfPath: string; nShards: int; outputTemplate: string;
                       nThreads: int; forceScan: bool;
-                      stages: seq[seq[string]]; noKill: bool; cfg: GatherConfig;
-                      inputUncompress: bool = false) =
+                      stages: seq[seq[string]]; noKill: bool; cfg: GatherConfig) =
   ## Scatter vcfPath into nShards shards, pipe each through the tool pipeline,
   ## capture stdout via interceptor threads, then concatenate into cfg.outputPath.
   ## {} in stage tokens is substituted with the zero-padded shard number.
   ## All N shards run concurrently.
   let actualThreads = if nThreads == 0: countProcessors() else: nThreads
   # Pool must accommodate scatter writer threads and interceptor threads simultaneously.
-  setMaxPoolSize(max(actualThreads, nShards) + nShards)
+  setMaxPoolSize(nShards * 2)
   let fmt   = if vcfPath.endsWith(".bcf"): ffBcf else: ffVcf
   let tasks = computeShards(vcfPath, nShards, actualThreads, forceScan, fmt)
   createDir(cfg.tmpDir)
@@ -348,7 +347,7 @@ proc runShardsGather*(vcfPath: string; nShards: int; outputTemplate: string;
     # Spawn shard writer (writes shard bytes to stdinPipe[1]).
     var task = tasks[i]
     task.outFd = stdinPipe[1]
-    task.decompress = inputUncompress
+    task.decompress = true
     let writeFv = spawn doWriteShard(task)
     # Spawn interceptor (reads shell stdout from stdoutPipe[0], writes to tmpPath).
     let interceptFd = stdoutPipe[0]
@@ -487,14 +486,13 @@ proc doCollectInterceptor*(shardIdx: int; inputFd: cint; outFd: cint): int {.gcs
 
 proc runShardsCollect*(vcfPath: string; nShards: int; outputPath: string;
                        nThreads: int; forceScan: bool;
-                       stages: seq[seq[string]]; noKill: bool; toStdout: bool;
-                       inputUncompress: bool = false) =
+                       stages: seq[seq[string]]; noKill: bool; toStdout: bool) =
   ## +collect+: scatter into N shards, pipe each through the pipeline,
   ## stream complete records to outputPath (or stdout) in arrival order.
   ## No temp files. No ordering guarantee.
   let actualThreads = if nThreads == 0: countProcessors() else: nThreads
   # Pool must accommodate scatter writer threads and interceptor threads.
-  setMaxPoolSize(max(actualThreads, nShards) + nShards)
+  setMaxPoolSize(nShards * 2)
   let fmt   = if vcfPath.endsWith(".bcf"): ffBcf else: ffVcf
   let tasks = computeShards(vcfPath, nShards, actualThreads, forceScan, fmt)
 
@@ -541,7 +539,7 @@ proc runShardsCollect*(vcfPath: string; nShards: int; outputPath: string;
     discard posix.close(stdoutPipe[1])
     var task = tasks[i]
     task.outFd = stdinPipe[1]
-    task.decompress = inputUncompress
+    task.decompress = true
     let writeFv = spawn doWriteShard(task)
     let extraFv = spawn doCollectInterceptor(i, stdoutPipe[0], outFd)
     inFlight.add(InFlight(pid: pid, writeFv: writeFv, extraFv: extraFv, shardIdx: i))
@@ -649,17 +647,67 @@ proc doMergeFeeder(shardIdx: int; srcFd: cint; relayWriteFd: cint): int {.gcsafe
 
 proc runShardsMerge*(vcfPath: string; nShards: int; outputPath: string;
                      nThreads: int; forceScan: bool;
-                     stages: seq[seq[string]]; noKill: bool; toStdout: bool;
-                     inputUncompress: bool = false) =
+                     stages: seq[seq[string]]; noKill: bool; toStdout: bool) =
   ## +merge+: scatter vcfPath into nShards shards, pipe each through the pipeline,
   ## strip headers, k-way merge records to outputPath (or stdout) in genomic order.
+  ## Uses interleaved scatter: blocks assigned round-robin so all shards receive
+  ## data concurrently, enabling stall-free merge.
   ## No temp files. Output is uncompressed VCF or BCF.
-  ## Sequential scatter warning: may block on the slowest shard until M3 implements
-  ## interleaved scatter.
   let actualThreads = if nThreads == 0: countProcessors() else: nThreads
-  setMaxPoolSize(max(actualThreads, nShards) + nShards)
+  # Need nShards writers + nShards feeders running concurrently to avoid
+  # pipe deadlock (writer blocks on stdin pipe if feeder isn't draining stdout).
+  setMaxPoolSize(nShards * 2)
   let fmt   = if vcfPath.endsWith(".bcf"): ffBcf else: ffVcf
-  let tasks = computeShards(vcfPath, nShards, actualThreads, forceScan, fmt)
+  let fileSize = getFileSize(vcfPath)
+
+  # --- Compute interleaved block assignment ---
+  # For both BCF and VCF, prefer index virtual offsets (CSI/TBI) as chunk
+  # boundaries: each entry has a known (block_off, u_off) so head splits are
+  # exact. Fall back to scanning all BGZF blocks only when no index exists.
+  var headerBytes: seq[byte]
+  var starts: seq[int64]
+  var voffs: seq[(int64, int)]
+  var firstDataBlockOff: int64
+  var firstUOff: int
+
+  if fmt == ffBcf:
+    headerBytes = decompressBgzfBytes(extractBcfHeader(vcfPath))
+    let (fdbo, uOff) = bcfFirstDataVirtualOffset(vcfPath)
+    firstDataBlockOff = fdbo
+    firstUOff = uOff
+  else:
+    let (hb, fb) = getHeaderAndFirstBlock(vcfPath)
+    headerBytes = decompressBgzfBytes(hb)
+    firstDataBlockOff = fb
+    firstUOff = 0  # VCF data block starts at byte 0
+
+  voffs = readIndexVirtualOffsets(vcfPath)
+  # Drop any voffs that point before the first data block (header region).
+  voffs.keepItIf(it[0] >= firstDataBlockOff)
+  # Ensure the first data block is in the voffs list.
+  let firstVO = (firstDataBlockOff, firstUOff)
+  if firstVO notin voffs: voffs.add(firstVO)
+  voffs.sort(proc(a, b: (int64, int)): int =
+    if a[0] != b[0]: cmp(a[0], b[0]) else: cmp(a[1], b[1]))
+
+  if voffs.len > 1:
+    # Indexed mode: chunk boundaries only at index entry block offsets.
+    # Each starts[i] may span multiple BGZF blocks (up to starts[i+1]).
+    var uniq: seq[int64]
+    for v in voffs:
+      if uniq.len == 0 or uniq[^1] != v[0]:
+        uniq.add(v[0])
+    starts = uniq
+  else:
+    # No index: scan all BGZF blocks. VCF only — BCF without CSI is rejected
+    # earlier in main.nim.
+    starts = scanAllBlockStarts(vcfPath, firstDataBlockOff)
+
+  # Compute sizes; exclude the 28-byte BGZF EOF block from the last entry.
+  var sizes = getLengths(starts, fileSize - 28)
+  let nDataBlocks = starts.len
+  let chunkSize = max(1, (nDataBlocks + nShards * 10 - 1) div (nShards * 10))
+  let assignment = interleavedBlockAssignment(nDataBlocks, nShards, chunkSize)
 
   # Reset merge globals.
   gMergeHeader.ready = false
@@ -667,11 +715,18 @@ proc runShardsMerge*(vcfPath: string; nShards: int; outputPath: string;
   gMergeFormat      = fmt
   gMergeBgzfWarned  = false
 
-  stderr.writeLine "warning: +merge+ with sequential scatter may block on the slowest shard (expected until interleaved scatter is implemented)"
+  # Allocate per-worker inboxes for partial-record handoff.
+  var inboxes = newInboxArray(nShards)
 
   var inFlight:    seq[InFlight]
   var relayReadFds: seq[cint]
+  var writerTasks: seq[InterleavedTask]
+  var stdinWriteFds: seq[cint]
 
+  # Phase 1: create all pipes, fork all children, spawn all feeders.
+  # Feeders must be running before writers start to prevent pipe deadlock:
+  # writer fills subprocess stdin → subprocess fills stdout → feeder drains.
+  # If feeders aren't draining stdout, the whole pipeline backs up.
   for i in 0 ..< nShards:
     var stdinPipe:  array[2, cint]
     var stdoutPipe: array[2, cint]
@@ -680,23 +735,41 @@ proc runShardsMerge*(vcfPath: string; nShards: int; outputPath: string;
        posix.pipe(relayPipe) != 0:
       stderr.writeLine &"error: pipe() failed for shard {i + 1}"
       quit(1)
-    # Prevent inherited write-ends from causing deadlocks in future forks.
-    # Child j+1 must not hold stdinPipe[1][j] or relayPipe[1][j] after exec.
-    # stdoutPipe[0] is read by the feeder thread; also mark CLOEXEC for hygiene.
+    # Enlarge pipe buffers to avoid bidirectional pipe deadlock: writer blocks on
+    # stdinPipe (full) while subprocess blocks on stdoutPipe (full) while feeder
+    # blocks on relayPipe (full). 1MB per pipe accommodates typical per-chunk data.
+    when defined(linux):
+      const F_SETPIPE_SZ = cint(1031)
+      const PipeBufSize = cint(1048576)  # 1MB
+      discard posix.fcntl(stdinPipe[0],  F_SETPIPE_SZ, PipeBufSize)
+      discard posix.fcntl(stdoutPipe[0], F_SETPIPE_SZ, PipeBufSize)
+      discard posix.fcntl(relayPipe[0],  F_SETPIPE_SZ, PipeBufSize)
     discard posix.fcntl(stdinPipe[1],  F_SETFD, FD_CLOEXEC)
+    discard posix.fcntl(relayPipe[0],  F_SETFD, FD_CLOEXEC)
     discard posix.fcntl(relayPipe[1],  F_SETFD, FD_CLOEXEC)
     discard posix.fcntl(stdoutPipe[0], F_SETFD, FD_CLOEXEC)
     let shardCmd = buildShellCmdForShard(stages, i, nShards)
     let pid = forkExecSh(stdinPipe[0], stdinPipe[1], stdoutPipe[1], shardCmd, i)
     discard posix.close(stdinPipe[0])
     discard posix.close(stdoutPipe[1])
-    var task = tasks[i]
-    task.outFd      = stdinPipe[1]
-    task.decompress = inputUncompress
-    let writeFv = spawn doWriteShard(task)
+    # Spawn feeder immediately — it blocks on read until subprocess produces output.
     let extraFv = spawn doMergeFeeder(i, stdoutPipe[0], relayPipe[1])
     relayReadFds.add(relayPipe[0])
-    inFlight.add(InFlight(pid: pid, writeFv: writeFv, extraFv: extraFv, shardIdx: i))
+    stdinWriteFds.add(stdinPipe[1])
+    writerTasks.add(InterleavedTask(
+      vcfPath: vcfPath, outFd: stdinPipe[1],
+      headerBytes: headerBytes,
+      blockStarts: addr starts, blockSizes: addr sizes,
+      chunkIndices: assignment[i], format: fmt,
+      csiVoffs: if voffs.len > 1: addr voffs else: nil,
+      shardIdx: i, nShards: nShards, chunkSize: chunkSize,
+      inboxes: addr inboxes))
+    inFlight.add(InFlight(pid: pid, writeFv: nil, extraFv: extraFv, shardIdx: i))
+
+  # Phase 2: spawn all writers now that feeders are ready to drain stdout.
+  # Brief yield to let feeder threads start their blocking read() calls.
+  for i in 0 ..< nShards:
+    inFlight[i].writeFv = spawn writeInterleavedShard(writerTasks[i])
 
   # Wait for shard 0 feeder to detect format and capture header.
   while not gMergeHeader.ready: sleep(1)
@@ -742,4 +815,5 @@ proc runShardsMerge*(vcfPath: string; nShards: int; outputPath: string;
       break
   while inFlight.len > 0:
     waitOne(inFlight, anyFailed)
+  freeInboxArray(inboxes)
   if anyFailed: quit(1)

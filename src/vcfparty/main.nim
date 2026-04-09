@@ -1,7 +1,7 @@
 ## vcfparty CLI — argument parsing and subcommand dispatch.
 ## Entry point is src/vcfparty.nim which includes this file.
 
-import std/[options, os, parseopt, strutils]
+import std/[options, os, parseopt, strutils, tempfiles]
 import scatter
 import run
 import gather
@@ -39,50 +39,11 @@ proc scatterUsage() =
   stderr.writeLine "Options:"
   stderr.writeLine "  -n, --n-shards <int>      number of output shards (required, >= 1)"
   stderr.writeLine "  -o, --output <str>        output file prefix (required)"
-  stderr.writeLine "  -s, --sequential          sequential (contiguous) scatter — default for indexed files"
-  stderr.writeLine "  -i, --interleave          interleaved scatter — not yet implemented; emits warning and uses sequential"
-  stderr.writeLine "  -Oz, -Ov, -Ob, -Ou"
-  stderr.writeLine "  -O <z|v|b|u>, --output-type <z|v|b|u>"
-  stderr.writeLine "                            output format: z=VCF BGZF, v=VCF, b=BCF BGZF, u=BCF"
-  stderr.writeLine "                            format must match input; error if mismatch (sniffed, not guessed)"
   stderr.writeLine "  -t, --max-threads <int>   max threads for scan/split/write (default: min(n-shards, 8))"
   stderr.writeLine "      --force-scan          always scan BGZF blocks (ignore index even if present)"
   stderr.writeLine "  -v, --verbose             print progress info to stderr (block offsets, boundaries, shards)"
   stderr.writeLine "  -h, --help                show this help"
   quit(1)
-
-proc parseFmtLetter(flag: string; p: var OptParser): char =
-  ## Parse one of z/v/b/u from -Oz, -O z, --output-type z, -Pv, -P v, --pipe-type v.
-  ## flag is "O" or "P" (used in error messages).
-  ## Accepts all four bcftools format letters.
-  const valid = {'z', 'v', 'b', 'u'}
-  let errBad = "error: -" & flag & ": accepted letters are z (VCF BGZF), " &
-               "v (VCF uncompressed), b (BCF BGZF), u (BCF uncompressed)"
-  var v = ""
-  if p.val != "":
-    v = p.val
-  else:
-    p.next()
-    if p.kind == cmdArgument and p.key.len == 1 and p.key[0] in valid:
-      v = p.key
-    elif p.kind in {cmdShortOption, cmdLongOption} and p.key.len == 1 and
-         p.key[0] in valid:
-      v = p.key
-    else:
-      stderr.writeLine errBad
-      quit(1)
-  if v.len != 1 or v[0] notin valid:
-    stderr.writeLine errBad
-    quit(1)
-  result = v[0]
-
-proc letterComp(c: char): Compression =
-  ## Map format letter to output compression: z/b → BGZF; v/u → uncompressed.
-  if c in {'z', 'b'}: compBgzf else: compNone
-
-proc letterDecompress(c: char): bool =
-  ## Map format letter to inputUncompress flag: v/u → true; z/b → false.
-  c in {'v', 'u'}
 
 proc nextVal(p: var OptParser; flag: string): string =
   ## Return the value for a flag, consuming the next argv token if the value
@@ -109,9 +70,6 @@ proc runScatter(rawArgs: seq[string]) =
   var nThreads     = 0
   var nThreadsSet  = false
   var forceScan    = false
-  var interleave   = false
-  var outputFmt: char = '\0'
-  var outputFmtSet = false
   var p = initOptParser(rawArgs)
   while true:
     p.next()
@@ -130,18 +88,17 @@ proc runScatter(rawArgs: seq[string]) =
       of "o", "output":
         outPrefix = nextVal(p, "o")
       of "s", "sequential":
-        discard  # default; accepted and ignored
+        stderr.writeLine "error: -s/--sequential is no longer supported; scatter is always sequential"
+        quit(1)
       of "i", "interleave":
-        interleave = true
+        stderr.writeLine "error: -i/--interleave is no longer supported; interleaving is chosen automatically by terminal operator"
+        quit(1)
       of "d", "decompress":
-        stderr.writeLine "error: -d/--decompress is retired; use -Ou for uncompressed shard output"
+        stderr.writeLine "error: -d/--decompress is no longer supported; scatter always writes compressed output"
         quit(1)
       of "O", "output-type":
-        if outputFmtSet:
-          stderr.writeLine "error: only one -O/--output-type flag is allowed"
-          quit(1)
-        outputFmt    = parseFmtLetter("O", p)
-        outputFmtSet = true
+        stderr.writeLine "error: -O/--output-type is no longer supported; output format is inferred from -o extension"
+        quit(1)
       of "t", "max-threads":
         let v = nextVal(p, "t")
         try:
@@ -188,35 +145,8 @@ proc runScatter(rawArgs: seq[string]) =
     quit(1)
   if not nThreadsSet:
     nThreads = min(nShards, 8)
-  if interleave:
-    stderr.writeLine "warning: -i/--interleave is not yet implemented; using sequential scatter"
-  # Validate -O letter format against sniffed input format.
-  if outputFmtSet:
-    let flagFmt = if outputFmt in {'z', 'v'}: ffVcf else: ffBcf
-    if flagFmt != fmt:
-      let inName = if fmt == ffVcf: "VCF" else: "BCF"
-      stderr.writeLine "error: -O" & outputFmt & ": input is " & inName &
-        "; format conversion is the pipeline's responsibility"
-      quit(1)
   warnFormatMismatch(inputFile, outPrefix)
-  # Determine output compression: flag overrides extension inference.
-  let extBgzf = outPrefix.endsWith(".vcf.gz") or outPrefix.endsWith(".vcf.bgz") or
-                outPrefix.endsWith(".bcf") or outPrefix.endsWith(".bgz")
-  let extUncompressed = outPrefix.endsWith(".vcf") and not outPrefix.endsWith(".vcf.gz") and
-                        not outPrefix.endsWith(".vcf.bgz")
-  let decompress =
-    if outputFmtSet:
-      let flagIsUncomp = letterDecompress(outputFmt)
-      if flagIsUncomp and extBgzf:
-        stderr.writeLine "warning: -O" & outputFmt &
-          " disagrees with output extension (extension implies BGZF)"
-      elif not flagIsUncomp and extUncompressed:
-        stderr.writeLine "warning: -O" & outputFmt &
-          " disagrees with output extension (extension implies uncompressed)"
-      flagIsUncomp
-    else:
-      extUncompressed  # .vcf → uncompressed; .vcf.gz/.bcf/unknown → BGZF
-  scatter(inputFile, nShards, outPrefix, nThreads, forceScan, fmt, decompress)
+  scatter(inputFile, nShards, outPrefix, nThreads, forceScan, fmt)
 
 proc runUsage() =
   ## Print run subcommand usage to stderr and exit 1.
@@ -225,22 +155,12 @@ proc runUsage() =
   stderr.writeLine "Options:"
   stderr.writeLine "  -n, --n-shards <int>         number of shards (required, >= 1); controls both shard count and concurrency"
   stderr.writeLine "  -o, --output <str>           output path or prefix (default: stdout)"
-  stderr.writeLine "  -s, --sequential             sequential (contiguous) scatter — default for indexed files"
-  stderr.writeLine "  -i, --interleave             interleaved scatter — not yet implemented; emits warning and uses sequential"
-  stderr.writeLine "  -Oz, -Ov, -Ob, -Ou"
-  stderr.writeLine "  -O <z|v|b|u>, --output-type <z|v|b|u>"
-  stderr.writeLine "                               output format: z=VCF BGZF, v=VCF, b=BCF BGZF, u=BCF"
-  stderr.writeLine "                               validated against pipeline output at runtime"
-  stderr.writeLine "  -Pz, -Pv, -Pb, -Pu"
-  stderr.writeLine "  -P <z|v|b|u>, --pipe-type <z|v|b|u>"
-  stderr.writeLine "                               format/compression sent to subprocess stdin"
-  stderr.writeLine "                               format validated against input file (sniffed); v/u decompress BGZF"
+  stderr.writeLine "  -u                           force uncompressed file output (error with tool-managed {})"
   stderr.writeLine "  -t, --max-threads <int>      max threads for scatter/validation (default: min(n-shards, 8))"
   stderr.writeLine "      --force-scan             always scan BGZF blocks (ignore index even if present)"
   stderr.writeLine "      --no-kill                on failure, let sibling shards finish (default: kill them)"
   stderr.writeLine "      --header-pattern <pat>   strip lines starting with pat from shards 2..N (text format only)"
   stderr.writeLine "      --header-n <n>           strip the first n lines from shards 2..N (text format only)"
-  stderr.writeLine "      --tmp-dir <dir>          temp dir for gather shard files (default: $TMPDIR/vcfparty)"
   stderr.writeLine "  -v, --verbose                print per-shard progress to stderr"
   stderr.writeLine "  -h, --help                   show this help"
   stderr.writeLine ""
@@ -275,18 +195,12 @@ proc runRun(rawArgs: seq[string]) =
   var nThreads        = 0
   var nThreadsSet     = false
   var forceScan       = false
+  var forceUncompress = false
   var noKill          = false
   var headerPattern   = ""
   var headerPatternSet = false
   var headerN         = 0
   var headerNSet      = false
-  var tmpDir          = ""
-  var interleave      = false
-  var inputUncompress = false
-  var pipeFmt: char   = '\0'
-  var pipeFmtSet      = false
-  var outputFmt: char = '\0'
-  var outputFmtSet    = false
   var p = initOptParser(vcfpartyPart)
   while true:
     p.next()
@@ -304,30 +218,26 @@ proc runRun(rawArgs: seq[string]) =
         nShardsSet = true
       of "o", "output":
         outPrefix = nextVal(p, "o")
+      of "u":
+        forceUncompress = true
       of "s", "sequential":
-        discard  # default; accepted and ignored
+        stderr.writeLine "error: -s/--sequential is no longer supported; scatter is always sequential"
+        quit(1)
       of "i", "interleave":
-        interleave = true
+        stderr.writeLine "error: -i/--interleave is no longer supported; interleaving is chosen automatically by terminal operator"
+        quit(1)
       of "d", "decompress":
-        stderr.writeLine "error: -d/--decompress is retired; use -Pv (VCF uncompressed) or -Pu (BCF uncompressed)"
+        stderr.writeLine "error: -d/--decompress is no longer supported; pipes always decompress"
         quit(1)
       of "I", "input-uncompress":
-        stderr.writeLine "error: -I/--input-uncompress is retired; " &
-          "use -Pv (VCF uncompressed) or -Pu (BCF uncompressed)"
+        stderr.writeLine "error: -I/--input-uncompress is no longer supported; pipes always decompress"
         quit(1)
       of "P", "pipe-type":
-        if pipeFmtSet:
-          stderr.writeLine "error: only one -P/--pipe-type flag is allowed"
-          quit(1)
-        pipeFmt    = parseFmtLetter("P", p)
-        pipeFmtSet = true
-        inputUncompress = letterDecompress(pipeFmt)
+        stderr.writeLine "error: -P/--pipe-type is no longer supported; pipes always decompress"
+        quit(1)
       of "O", "output-type":
-        if outputFmtSet:
-          stderr.writeLine "error: only one -O/--output-type flag is allowed"
-          quit(1)
-        outputFmt    = parseFmtLetter("O", p)
-        outputFmtSet = true
+        stderr.writeLine "error: -O/--output-type is no longer supported; output format is inferred from -o extension"
+        quit(1)
       of "t", "max-threads":
         let v = nextVal(p, "t")
         try:
@@ -358,7 +268,8 @@ proc runRun(rawArgs: seq[string]) =
           quit(1)
         headerNSet = true
       of "tmp-dir":
-        tmpDir = nextVal(p, "tmp-dir")
+        stderr.writeLine "error: --tmp-dir is no longer supported; temp directory is created automatically"
+        quit(1)
       of "v", "verbose":
         scatter.verbose = true
       of "h", "help":
@@ -389,44 +300,23 @@ proc runRun(rawArgs: seq[string]) =
     quit(1)
   if not nThreadsSet:
     nThreads = min(nShards, 8)
-  if interleave:
-    stderr.writeLine "warning: -i/--interleave is not yet implemented; using sequential scatter"
-  if pipeFmtSet and interleave:
-    stderr.writeLine "warning: -P is ignored with interleaved scatter (input is already uncompressed)"
-    inputUncompress = false
-  # Validate -P letter format against sniffed input file format.
-  if pipeFmtSet:
-    let flagFmt = if pipeFmt in {'z', 'v'}: ffVcf else: ffBcf
-    if flagFmt != fmt:
-      let inName = if fmt == ffVcf: "VCF" else: "BCF"
-      stderr.writeLine "error: -P" & pipeFmt & ": input is " & inName &
-        "; format conversion is the pipeline's responsibility"
-      quit(1)
-  # Set gExpectedOutputFmt for runtime validation of pipeline output format.
-  if outputFmtSet:
-    gExpectedOutputFmt = outputFmt
   let (_, stages, termOp) = parseRunArgv(rawArgs)
   let hasBrace             = hasBracePlaceholder(stages)
 
   case termOp
   of topConcat:
     let isStdout = (outPrefix == "" or outPrefix == "/dev/stdout")
-    var (gFmt, gComp) = inferFileFormat(outPrefix, "")
-    if outputFmtSet:
-      let flagComp = letterComp(outputFmt)
-      if isStdout and outputFmt in {'z', 'b'}:
-        stderr.writeLine "warning: -O" & outputFmt &
-          " ignored for stdout output (stdout is always uncompressed)"
-      elif not isStdout:
-        if letterDecompress(outputFmt) != (gComp == compNone):
-          stderr.writeLine "warning: -O" & outputFmt & " disagrees with output extension"
-        gComp = flagComp
-    let resolvedTmpDir =
-      if tmpDir != "": tmpDir
-      else: getEnv("TMPDIR", "/tmp") / "vcfparty"
+    let (gFmt, gComp) = inferFileFormat(outPrefix, "")
+    let finalComp =
+      if isStdout: compNone
+      elif forceUncompress: compNone
+      else: gComp
+    if forceUncompress and not isStdout and gComp == compBgzf:
+      stderr.writeLine "warning: -u forces uncompressed output but -o extension suggests compressed"
+    let resolvedTmpDir = createTempDir("vcfparty_", "")
     var cfg = GatherConfig(
       format:      gFmt,
-      compression: if isStdout: compNone else: gComp,
+      compression: finalComp,
       outputPath:  if isStdout: "" else: outPrefix,
       tmpDir:      resolvedTmpDir,
       shardCount:  nShards,
@@ -439,39 +329,32 @@ proc runRun(rawArgs: seq[string]) =
     if not isStdout:
       warnFormatMismatch(inputFile, outPrefix)
     runShardsGather(inputFile, nShards, outPrefix, nThreads, forceScan,
-                    stages, noKill, cfg, inputUncompress)
+                    stages, noKill, cfg)
   of topCollect:
     let isStdout = (outPrefix == "" or outPrefix == "/dev/stdout")
-    if outputFmtSet:
-      if isStdout and outputFmt in {'z', 'b'}:
-        stderr.writeLine "warning: -O" & outputFmt & " ignored for stdout output"
-      elif not isStdout:
-        let (_, extComp) = inferFileFormat(outPrefix, "")
-        if letterDecompress(outputFmt) != (extComp == compNone):
-          stderr.writeLine "warning: -O" & outputFmt & " disagrees with output extension"
     if not isStdout:
       warnFormatMismatch(inputFile, outPrefix)
     runShardsCollect(inputFile, nShards, outPrefix, nThreads, forceScan,
-                     stages, noKill, isStdout, inputUncompress)
+                     stages, noKill, isStdout)
   of topMerge:
-    if outputFmtSet and outputFmt in {'z', 'b'}:
-      stderr.writeLine "warning: -O" & outputFmt &
-        " ignored for +merge+; merge output is always uncompressed"
     let isStdout = (outPrefix == "" or outPrefix == "/dev/stdout")
     if not isStdout:
       warnFormatMismatch(inputFile, outPrefix)
     runShardsMerge(inputFile, nShards, outPrefix, nThreads, forceScan,
-                   stages, noKill, isStdout, inputUncompress)
+                   stages, noKill, isStdout)
   of topNone:
     let mode = inferRunMode(outPrefix != "", hasBrace)
     case mode
     of rmToolManaged:
+      if forceUncompress:
+        stderr.writeLine "error: -u cannot be used with tool-managed output ({}); vcfparty does not control that output"
+        quit(1)
       runShards(inputFile, nShards, outPrefix, nThreads, forceScan,
-                stages, noKill, toolManaged = true, inputUncompress)
+                stages, noKill, toolManaged = true)
     of rmNormal:
       warnFormatMismatch(inputFile, outPrefix)
       runShards(inputFile, nShards, outPrefix, nThreads, forceScan,
-                stages, noKill, inputUncompress = inputUncompress)
+                stages, noKill)
 
 proc gatherUsage() =
   ## Print gather subcommand usage to stderr and exit 1.
@@ -479,11 +362,6 @@ proc gatherUsage() =
   stderr.writeLine ""
   stderr.writeLine "Options:"
   stderr.writeLine "  -o, --output <str>           gather output path (default: stdout)"
-  stderr.writeLine "      --concat                 concatenate shards in genomic order (default)"
-  stderr.writeLine "      --merge                  k-way merge sort output in genomic order"
-  stderr.writeLine "  -Oz, -Ov, -Ob, -Ou"
-  stderr.writeLine "  -O <z|v|b|u>, --output-type <z|v|b|u>"
-  stderr.writeLine "                               output format: z=VCF BGZF, v=VCF, b=BCF BGZF, u=BCF"
   stderr.writeLine "      --header-pattern <pat>   strip lines starting with pat from shards 2..N (text format only)"
   stderr.writeLine "      --header-n <n>           strip the first n lines from shards 2..N (text format only)"
   stderr.writeLine "  -v, --verbose                print progress to stderr"
@@ -493,13 +371,10 @@ proc gatherUsage() =
 proc runGather(rawArgs: seq[string]) =
   ## Parse gather subcommand arguments and concatenate pre-existing shard files.
   var outPath: string      = ""
-  var outputFmt: char      = '\0'
-  var outputFmtSet         = false
   var headerPattern        = ""
   var headerPatternSet     = false
   var headerN              = 0
   var headerNSet           = false
-  var useMerge             = false
   var inputFiles: seq[string]
   var p = initOptParser(rawArgs)
   while true:
@@ -511,15 +386,14 @@ proc runGather(rawArgs: seq[string]) =
       of "o", "output":
         outPath = nextVal(p, "o")
       of "concat":
-        discard  # default; accepted and ignored
+        stderr.writeLine "error: --concat is no longer supported; gather always concatenates"
+        quit(1)
       of "merge":
-        useMerge = true
+        stderr.writeLine "error: --merge is no longer supported; use 'vcfparty run ... +merge+' instead"
+        quit(1)
       of "O", "output-type":
-        if outputFmtSet:
-          stderr.writeLine "error: only one -O/--output-type flag is allowed"
-          quit(1)
-        outputFmt    = parseFmtLetter("O", p)
-        outputFmtSet = true
+        stderr.writeLine "error: -O/--output-type is no longer supported; output format is inferred from -o extension"
+        quit(1)
       of "header-pattern":
         headerPattern    = nextVal(p, "header-pattern")
         headerPatternSet = true
@@ -551,18 +425,7 @@ proc runGather(rawArgs: seq[string]) =
       stderr.writeLine "error: input file not found: " & f
       quit(1)
   let isStdout = (outPath == "" or outPath == "/dev/stdout")
-  let (gFmt, gComp0) = inferFileFormat(outPath, "")
-  var gComp = gComp0
-  if outputFmtSet:
-    let flagComp = letterComp(outputFmt)
-    if isStdout and outputFmt in {'z', 'b'}:
-      stderr.writeLine "warning: -O" & outputFmt &
-        " ignored for stdout output (stdout is always uncompressed)"
-    else:
-      if letterDecompress(outputFmt) != (gComp == compNone):
-        stderr.writeLine "warning: -O" & outputFmt & " disagrees with output extension"
-      if not isStdout:
-        gComp = flagComp
+  let (gFmt, gComp) = inferFileFormat(outPath, "")
   var cfg = GatherConfig(
     format:      gFmt,
     compression: if isStdout: compNone else: gComp,
@@ -578,10 +441,7 @@ proc runGather(rawArgs: seq[string]) =
     let outDir = outPath.parentDir
     if outDir != "":
       createDir(outDir)
-  if useMerge:
-    gatherFilesMerge(cfg, inputFiles)
-  else:
-    gatherFiles(cfg, inputFiles)
+  gatherFiles(cfg, inputFiles)
 
 proc mainEntry*() =
   ## Top-level entry point: dispatch to the appropriate subcommand.

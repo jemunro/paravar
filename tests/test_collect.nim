@@ -2,7 +2,7 @@
 ## Run from project root: nim c -r tests/test_collect.nim
 ## Requires the vcfparty binary (nimble build) and tests/data fixtures.
 
-import std/[os, osproc, strformat, strutils]
+import std/[os, osproc, strformat, strutils, tempfiles]
 
 const BinPath  = "./vcfparty"
 const DataDir  = "tests/data"
@@ -35,8 +35,7 @@ let origBcf = countRecords(SmallBcf)
 # CO1 — single shard VCF collect → file
 # ---------------------------------------------------------------------------
 block testCollect1Shard:
-  let tmpDir  = getTempDir() / "vcfparty_c1_1shard"
-  createDir(tmpDir)
+  let tmpDir  = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
   let (outp, code) = runBin(&"-n 1 -o {outFile} {SmallVcf} ::: cat +collect+")
   doAssert code == 0, &"C1 exited {code}:\n{outp}"
@@ -51,8 +50,7 @@ block testCollect1Shard:
 # CO2 — 4 shards VCF collect → file (order-insensitive)
 # ---------------------------------------------------------------------------
 block testCollect4Shards:
-  let tmpDir  = getTempDir() / "vcfparty_c2_4shards"
-  createDir(tmpDir)
+  let tmpDir  = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
   let (outp, code) = runBin(&"-n 4 -o {outFile} {SmallVcf} ::: cat +collect+")
   doAssert code == 0, &"C2 exited {code}:\n{outp}"
@@ -67,8 +65,7 @@ block testCollect4Shards:
 # CO3 — BCF collect → file
 # ---------------------------------------------------------------------------
 block testCollectBcf:
-  let tmpDir  = getTempDir() / "vcfparty_c3_bcf"
-  createDir(tmpDir)
+  let tmpDir  = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.bcf"
   let (outp, code) = runBin(
     &"-n 4 -o {outFile} {SmallBcf} ::: bcftools view -Ou +collect+")
@@ -96,8 +93,7 @@ block testCollectStdout:
 # CO5 — no partial records: uncompressed VCF pipeline, bcftools validates output
 # ---------------------------------------------------------------------------
 block testCollectNoPartialRecords:
-  let tmpDir  = getTempDir() / "vcfparty_c5_nopartial"
-  createDir(tmpDir)
+  let tmpDir  = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
   let (outp, code) = runBin(
     &"-n 4 -o {outFile} {SmallVcf} ::: bcftools view -Ov +collect+")
