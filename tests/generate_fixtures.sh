@@ -7,7 +7,7 @@
 # Produces:
 #   tests/data/small.vcf.gz         ~5000 records, 3 chromosomes, TBI indexed
 #   tests/data/small_csi.vcf.gz     same content, CSI indexed only (no .tbi)
-#   tests/data/chr22_1kg.vcf.gz     25000 records from 1000 Genomes chr22 (optional)
+#   tests/data/chr22_1kg.vcf.gz     10000 records from 1000 Genomes chr22 (optional)
 
 set -euo pipefail
 
@@ -135,15 +135,15 @@ KG="${DATA_DIR}/chr22_1kg.vcf.gz"
 KG_TBI="${KG}.tbi"
 KG_VCF_URL="https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/ALL.chr22.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf.gz"
 
-SUBSAMPLE_AWK='/^#/{print; next} c<25000{print; c++} c>=25000{exit}'
+SUBSAMPLE_AWK='/^#/{print; next} c<10000{print; c++} c>=10000{exit}'
 KG_N_SAMPLES=500
 
 if [[ ! -f "${KG}" ]]; then
   if command -v wget &>/dev/null || command -v curl &>/dev/null; then
-    echo "Downloading and subsampling ${KG} (first 25000 records, first ${KG_N_SAMPLES} samples) ..."
+    echo "Downloading and subsampling ${KG} (first 10000 records, first ${KG_N_SAMPLES} samples) ..."
     KG_TMP="${DATA_DIR}/chr22_1kg_tmp.vcf.gz"
     # Step 1: download + record-subsample to a temp file.
-    # pipefail off: awk exits early (SIGPIPE) once it has 25000 records — that's expected.
+    # pipefail off: awk exits early (SIGPIPE) once it has 10000 records — that's expected.
     set +o pipefail
     if command -v wget &>/dev/null; then
       wget -q -O - "${KG_VCF_URL}" | bgzip -d | awk "${SUBSAMPLE_AWK}" | bgzip -c > "${KG_TMP}"

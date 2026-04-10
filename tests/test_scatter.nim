@@ -2,10 +2,13 @@
 ## and shard writing (Step 5).
 ## Run from project root: nim c -r tests/test_scatter.nim
 
+echo "--------------- Test Scatter ---------------"
+
 import std/[algorithm, math, os, osproc, posix, strformat, strutils, tempfiles]
 {.warning[Deprecated]: off.}
 import std/threadpool
 {.warning[Deprecated]: on.}
+import test_utils
 import "../src/vcfparty/vcf_utils"
 import "../src/vcfparty/scatter"
 
@@ -28,7 +31,7 @@ proc readMagic(path: string; offset: int64): array[3, byte] =
 # ---------------------------------------------------------------------------
 # SC1.1 — parseTbiVirtualOffsets: voffs non-empty, sorted, block_off has BGZF magic
 # ---------------------------------------------------------------------------
-block testParseTbiVirtualOffsets:
+timed("SC1.1", "parseTbiVirtualOffsets: virtual offsets valid"):
   let voffs = parseTbiVirtualOffsets(SmallVcf & ".tbi")
   doAssert voffs.len > 0, "parseTbiVirtualOffsets: no entries"
   for i in 1 ..< voffs.len:
@@ -38,20 +41,18 @@ block testParseTbiVirtualOffsets:
     let magic = readMagic(SmallVcf, v[0])
     doAssert magic[0] == 0x1f and magic[1] == 0x8b,
       &"bad BGZF magic at offset {v[0]}"
-  echo &"PASS SC1.1 parseTbiVirtualOffsets: {voffs.len} virtual offsets"
 
 # ---------------------------------------------------------------------------
 # SC1.2 — readIndexVirtualOffsets falls back to TBI when no .csi present
 # ---------------------------------------------------------------------------
-block testReadIndexVirtualOffsetsTbi:
+timed("SC1.2", "readIndexVirtualOffsets via TBI"):
   let voffs = readIndexVirtualOffsets(SmallVcf)
   doAssert voffs.len > 0, "readIndexVirtualOffsets (TBI): no entries"
-  echo &"PASS SC1.2 readIndexVirtualOffsets via TBI: {voffs.len} entries"
 
 # ---------------------------------------------------------------------------
 # SC1.3 — parseCsiVirtualOffsets: CSI-only fixture
 # ---------------------------------------------------------------------------
-block testParseCsiVirtualOffsets:
+timed("SC1.3", "parseCsiVirtualOffsets: virtual offsets valid"):
   doAssert fileExists(CsiVcf & ".csi"), "CSI fixture missing — run generate_fixtures.sh"
   doAssert not fileExists(CsiVcf & ".tbi"), "CSI fixture must not have a .tbi alongside it"
   let voffs = parseCsiVirtualOffsets(CsiVcf & ".csi")
@@ -63,15 +64,13 @@ block testParseCsiVirtualOffsets:
     let magic = readMagic(CsiVcf, v[0])
     doAssert magic[0] == 0x1f and magic[1] == 0x8b,
       &"bad BGZF magic at offset {v[0]}"
-  echo &"PASS SC1.3 parseCsiVirtualOffsets: {voffs.len} virtual offsets"
 
 # ---------------------------------------------------------------------------
 # SC1.4 — readIndexVirtualOffsets falls through to CSI when no .tbi present
 # ---------------------------------------------------------------------------
-block testReadIndexVirtualOffsetsCsi:
+timed("SC1.4", "readIndexVirtualOffsets via CSI"):
   let voffs = readIndexVirtualOffsets(CsiVcf)
   doAssert voffs.len > 0, "readIndexVirtualOffsets (CSI): no entries"
-  echo &"PASS SC1.4 readIndexVirtualOffsets via CSI: {voffs.len} entries"
 
 # ===========================================================================
 # SC5–SC10 — Boundary computation: header extraction, lengths, partition, validation
@@ -80,7 +79,7 @@ block testReadIndexVirtualOffsetsCsi:
 # ---------------------------------------------------------------------------
 # SC5 — testGetHeaderAndFirstBlock: header is valid BGZF, starts with '#'; firstBlock has BGZF magic
 # ---------------------------------------------------------------------------
-block testGetHeaderAndFirstBlock:
+timed("SC2.1", "getHeaderAndFirstBlock: header valid, firstBlock has BGZF magic"):
   let (hdrBytes, firstBlock) = getHeaderAndFirstBlock(SmallVcf)
   # Compressed header must be a valid BGZF block
   doAssert bgzfBlockSize(hdrBytes) > 0,
@@ -94,17 +93,15 @@ block testGetHeaderAndFirstBlock:
   let magic = readMagic(SmallVcf, firstBlock)
   doAssert magic[0] == 0x1f and magic[1] == 0x8b,
     &"getHeaderAndFirstBlock: firstBlock {firstBlock} has bad BGZF magic"
-  echo &"PASS SC2.1 getHeaderAndFirstBlock: firstBlock={firstBlock}"
 
 # ---------------------------------------------------------------------------
 # SC6 — testGetLengths: converts block starts to cumulative lengths correctly
 # ---------------------------------------------------------------------------
-block testGetLengths:
+timed("SC2.2", "getLengths: cumulative lengths correct"):
   let starts: seq[int64] = @[0'i64, 100, 300, 700]
   let lengths = getLengths(starts, 1000)
   doAssert lengths == @[100'i64, 200, 400, 300],
     &"getLengths: expected [100,200,400,300] got {lengths}"
-  echo "PASS SC2.2 getLengths"
 
 # SC3.1-SC3.4 (partitionBoundaries, isValidBoundary, optimiseBoundaries) removed:
 # these procs no longer exist after Milestone V — scatter now uses index virtual
@@ -177,7 +174,7 @@ proc checkShards(vcfPath: string; tmpl: string; n: int) =
 # ---------------------------------------------------------------------------
 # SC11 — testScanAllBlockStarts: scanAllBlockStarts returns non-empty, increasing, valid BGZF offsets
 # ---------------------------------------------------------------------------
-block testScanAllBlockStarts:
+timed("SC4.1", "scanAllBlockStarts: valid BGZF offsets"):
   let (_, firstBlock) = getHeaderAndFirstBlock(SmallVcf)
   let starts = scanAllBlockStarts(SmallVcf, firstBlock)
   doAssert starts.len > 0, "scanAllBlockStarts: no data blocks found"
@@ -187,12 +184,11 @@ block testScanAllBlockStarts:
       &"scanAllBlockStarts: bad BGZF magic at offset {off}"
   for i in 1 ..< starts.len:
     doAssert starts[i] > starts[i-1], "scanAllBlockStarts: not strictly increasing"
-  echo &"PASS SC4.1 scanAllBlockStarts: {starts.len} data blocks"
 
 # ---------------------------------------------------------------------------
 # SC12 — testScatter4ShardsTbi: 4 shards (TBI); BGZF structure, completeness, order, size balance
 # ---------------------------------------------------------------------------
-block testScatter4ShardsTbi:
+timed("SC5.1", "scatter TBI: 4 shards, completeness, order, balance"):
   let tmpDir = createTempDir("vcfparty_", "")
   let tmpl = tmpDir / "shard.{}.vcf.gz"
   scatter(SmallVcf, 4, tmpl)
@@ -206,31 +202,28 @@ block testScatter4ShardsTbi:
   doAssert maxSz.float / minSz.float < 2.0,
     &"scatter (TBI): shard size imbalance: max={maxSz} min={minSz}"
 
-  echo "PASS SC5.1 scatter TBI: 4 shards, completeness, order, balance"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
 # SC14 — testScatterForceScan: forceScan=true ignores index; result matches indexed scatter
 # ---------------------------------------------------------------------------
-block testScatterForceScan:
+timed("SC5.2", "scatter --force-scan: completeness, order"):
   ## scatter with forceScan=true on a fully indexed file — index is ignored.
   let tmpDir = createTempDir("vcfparty_", "")
   let tmpl = tmpDir / "shard.{}.vcf.gz"
   scatter(SmallVcf, 4, tmpl, 1, forceScan = true)
   checkShards(SmallVcf, tmpl, 4)
-  echo "PASS SC5.2 scatter --force-scan: completeness, order"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
 # SC15 — testScatter4ShardsCsi: 4 shards (CSI); BGZF structure, completeness, order
 # ---------------------------------------------------------------------------
-block testScatter4ShardsCsi:
+timed("SC5.3", "scatter CSI: 4 shards, completeness, order"):
   doAssert fileExists(CsiVcf & ".csi"), "CSI fixture missing — run generate_fixtures.sh"
   let tmpDir = createTempDir("vcfparty_", "")
   let tmpl = tmpDir / "shard.{}.vcf.gz"
   scatter(CsiVcf, 4, tmpl)
   checkShards(CsiVcf, tmpl, 4)
-  echo "PASS SC5.3 scatter CSI: 4 shards, completeness, order"
   removeDir(tmpDir)
 
 # ===========================================================================
@@ -244,7 +237,7 @@ proc leU32At(data: seq[byte]; pos: int): uint32 =
 # ---------------------------------------------------------------------------
 # SC16 — testExtractBcfHeaderSmall: BGZF magic, BCF magic, l_text > 0, total decompressed == 5+4+l_text
 # ---------------------------------------------------------------------------
-block testExtractBcfHeaderSmall:
+timed("SC6.1", "extractBcfHeader: small.bcf"):
   let hdrBytes = extractBcfHeader(SmallBcf)
   # Must be a valid BGZF block sequence
   doAssert bgzfBlockSize(hdrBytes) > 0,
@@ -272,12 +265,11 @@ block testExtractBcfHeaderSmall:
     pos += blkSz
   doAssert totalDecomp == expectedSize,
     &"extractBcfHeader: decompressed {totalDecomp} bytes, expected {expectedSize}"
-  echo &"PASS SC6.1 extractBcfHeader: small.bcf, l_text={lText}"
 
 # ---------------------------------------------------------------------------
 # SC17 — testExtractBcfHeaderLarge: large BCF (2504 samples); multi-block header decompresses correctly
 # ---------------------------------------------------------------------------
-block testExtractBcfHeaderLarge:
+timed("SC6.2", "extractBcfHeader: chr22_1kg.bcf large header"):
   # chr22_1kg.bcf has 2504 samples — verify extractBcfHeader handles it correctly.
   doAssert fileExists(KgBcf), &"large BCF fixture missing: {KgBcf}"
   let hdrBytes = extractBcfHeader(KgBcf)
@@ -303,7 +295,6 @@ block testExtractBcfHeaderLarge:
     pos += blkSz
   doAssert totalDecomp == expectedSize,
     &"extractBcfHeader large: decompressed {totalDecomp} bytes, expected {expectedSize}"
-  echo &"PASS SC6.2 extractBcfHeader: chr22_1kg.bcf, l_text={lText}"
 
 # (checkBcfShards helper follows)
 
@@ -389,7 +380,7 @@ proc checkBcfShards(bcfPath: string; tmpl: string; n: int) =
 # ---------------------------------------------------------------------------
 # SC19 — testBcfScatter4Shards: 4 BCF shards; BGZF, BCF magic, completeness, order, size balance
 # ---------------------------------------------------------------------------
-block testBcfScatter4Shards:
+timed("SC7.1", "BCF scatter: 4 shards, completeness, order, balance"):
   doAssert fileExists(SmallBcf), &"BCF fixture missing: {SmallBcf}"
   let tmpDir = createTempDir("vcfparty_", "")
   let tmpl = tmpDir / "shard.{}.bcf"
@@ -402,19 +393,17 @@ block testBcfScatter4Shards:
   doAssert minSz > 0, "BCF scatter 4 shards: at least one shard is empty"
   doAssert maxSz.float / minSz.float < 2.0,
     &"BCF scatter 4 shards: shard size imbalance: max={maxSz} min={minSz}"
-  echo "PASS SC7.1 BCF scatter: 4 shards, completeness, order, balance"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
 # SC20 — testBcfScatterLargeHeader: 4 BCF shards from 1KG (large header); completeness and order
 # ---------------------------------------------------------------------------
-block testBcfScatterLargeHeader:
+timed("SC7.2", "BCF scatter: chr22_1kg.bcf large header, 4 shards"):
   doAssert fileExists(KgBcf), &"large BCF fixture missing: {KgBcf}"
   let tmpDir = createTempDir("vcfparty_", "")
   let tmpl = tmpDir / "shard.{}.bcf"
   scatter(KgBcf, 4, tmpl, format = ffBcf)
   checkBcfShards(KgBcf, tmpl, 4)
-  echo "PASS SC7.2 BCF scatter: chr22_1kg.bcf large header, 4 shards"
   removeDir(tmpDir)
 
 # ===========================================================================
@@ -436,39 +425,36 @@ proc allBlocksCovered(assignment: seq[seq[Slice[int]]]; nBlocks: int): bool =
 # ---------------------------------------------------------------------------
 # SC8.1 — every block assigned exactly once
 # ---------------------------------------------------------------------------
-block testInterleavedCoverage:
+timed("SC8.1", "interleavedBlockAssignment: every block assigned exactly once"):
   let a = interleavedBlockAssignment(20, 4, 3)
   doAssert a.len == 4, "SC8.1: expected 4 shards"
   doAssert allBlocksCovered(a, 20), "SC8.1: not all blocks covered exactly once"
-  echo "PASS SC8.1 interleavedBlockAssignment: every block assigned exactly once"
 
 # ---------------------------------------------------------------------------
 # SC8.2 — round-robin order correct
 # ---------------------------------------------------------------------------
-block testInterleavedRoundRobin:
+timed("SC8.2", "interleavedBlockAssignment: round-robin order correct"):
   # 12 blocks, 3 shards, K=2 → chunks: [0..1]=s0, [2..3]=s1, [4..5]=s2,
   #                                      [6..7]=s0, [8..9]=s1, [10..11]=s2
   let a = interleavedBlockAssignment(12, 3, 2)
   doAssert a[0] == @[0..1, 6..7],   "SC8.2: shard 0 wrong"
   doAssert a[1] == @[2..3, 8..9],   "SC8.2: shard 1 wrong"
   doAssert a[2] == @[4..5, 10..11], "SC8.2: shard 2 wrong"
-  echo "PASS SC8.2 interleavedBlockAssignment: round-robin order correct"
 
 # ---------------------------------------------------------------------------
 # SC8.3 — K=1 single-block chunks
 # ---------------------------------------------------------------------------
-block testInterleavedK1:
+timed("SC8.3", "interleavedBlockAssignment: K=1 single-block chunks"):
   let a = interleavedBlockAssignment(5, 3, 1)
   doAssert a[0] == @[0..0, 3..3], "SC8.3: shard 0 wrong"
   doAssert a[1] == @[1..1, 4..4], "SC8.3: shard 1 wrong"
   doAssert a[2] == @[2..2],       "SC8.3: shard 2 wrong"
   doAssert allBlocksCovered(a, 5), "SC8.3: coverage check failed"
-  echo "PASS SC8.3 interleavedBlockAssignment: K=1 single-block chunks"
 
 # ---------------------------------------------------------------------------
 # SC8.4 — nBlocks < nShards (some shards empty)
 # ---------------------------------------------------------------------------
-block testInterleavedFewBlocks:
+timed("SC8.4", "interleavedBlockAssignment: nBlocks < nShards, some shards empty"):
   let a = interleavedBlockAssignment(2, 5, 1)
   doAssert a[0] == @[0..0], "SC8.4: shard 0 wrong"
   doAssert a[1] == @[1..1], "SC8.4: shard 1 wrong"
@@ -476,18 +462,16 @@ block testInterleavedFewBlocks:
   doAssert a[3].len == 0,   "SC8.4: shard 3 should be empty"
   doAssert a[4].len == 0,   "SC8.4: shard 4 should be empty"
   doAssert allBlocksCovered(a, 2), "SC8.4: coverage check failed"
-  echo "PASS SC8.4 interleavedBlockAssignment: nBlocks < nShards, some shards empty"
 
 # ---------------------------------------------------------------------------
 # SC8.5 — nBlocks not divisible by K (last chunk smaller)
 # ---------------------------------------------------------------------------
-block testInterleavedLastChunkSmaller:
+timed("SC8.5", "interleavedBlockAssignment: last chunk smaller than K"):
   # 10 blocks, 2 shards, K=3 → chunks: [0..2]=s0, [3..5]=s1, [6..8]=s0, [9..9]=s1
   let a = interleavedBlockAssignment(10, 2, 3)
   doAssert a[0] == @[0..2, 6..8], "SC8.5: shard 0 wrong"
   doAssert a[1] == @[3..5, 9..9], "SC8.5: shard 1 wrong (last chunk should be 1 block)"
   doAssert allBlocksCovered(a, 10), "SC8.5: coverage check failed"
-  echo "PASS SC8.5 interleavedBlockAssignment: last chunk smaller than K"
 
 # ===========================================================================
 # SC9 — writeInterleavedShard: inbox model integration tests
@@ -551,19 +535,18 @@ proc writeInterleavedShards(vcfPath: string; nShards, chunkSize: int;
 # ---------------------------------------------------------------------------
 # SC9.1 — 1 shard interleaved = all records present (VCF)
 # ---------------------------------------------------------------------------
-block testInterleavedWrite1Shard:
+timed("SC9.1", "writeInterleavedShard: 1 shard VCF"):
   let tmpDir = createTempDir("vcfparty_", "")
   let paths = writeInterleavedShards(SmallVcf, 1, 3, tmpDir, ffVcf)
   let orig = countRecords(SmallVcf)
   let got  = countRecords(paths[0])
   doAssert got == orig, &"SC9.1: record count mismatch: got {got}, expected {orig}"
   removeDir(tmpDir)
-  echo &"PASS SC9.1 writeInterleavedShard: 1 shard VCF, {orig} records"
 
 # ---------------------------------------------------------------------------
 # SC9.2 — 4 shards interleaved, all records present (VCF)
 # ---------------------------------------------------------------------------
-block testInterleavedWrite4ShardsVcf:
+timed("SC9.2", "writeInterleavedShard: 4 shards VCF"):
   let tmpDir = createTempDir("vcfparty_", "")
   let paths = writeInterleavedShards(SmallVcf, 4, 2, tmpDir, ffVcf)
   let orig = countRecords(SmallVcf)
@@ -572,12 +555,11 @@ block testInterleavedWrite4ShardsVcf:
   doAssert total == orig,
     &"SC9.2: record count mismatch: got {total}, expected {orig}"
   removeDir(tmpDir)
-  echo &"PASS SC9.2 writeInterleavedShard: 4 shards VCF, {orig} records total"
 
 # ---------------------------------------------------------------------------
 # SC9.3 — BCF 4 shards interleaved, all records present
 # ---------------------------------------------------------------------------
-block testInterleavedWrite4ShardsBcf:
+timed("SC9.3", "writeInterleavedShard: 4 shards BCF"):
   let tmpDir = createTempDir("vcfparty_", "")
   let paths = writeInterleavedShards(SmallBcf, 4, 2, tmpDir, ffBcf)
   let orig = countRecords(SmallBcf)
@@ -586,12 +568,11 @@ block testInterleavedWrite4ShardsBcf:
   doAssert total == orig,
     &"SC9.3: BCF record count mismatch: got {total}, expected {orig}"
   removeDir(tmpDir)
-  echo &"PASS SC9.3 writeInterleavedShard: 4 shards BCF, {orig} records total"
 
 # ---------------------------------------------------------------------------
 # SC9.4 — K=1 forces maximum chunk boundaries; still all records present
 # ---------------------------------------------------------------------------
-block testInterleavedWriteK1:
+timed("SC9.4", "writeInterleavedShard: K=1, 4 shards VCF"):
   let tmpDir = createTempDir("vcfparty_", "")
   let paths = writeInterleavedShards(SmallVcf, 4, 1, tmpDir, ffVcf)
   let orig = countRecords(SmallVcf)
@@ -600,6 +581,3 @@ block testInterleavedWriteK1:
   doAssert total == orig,
     &"SC9.4: K=1 record count mismatch: got {total}, expected {orig}"
   removeDir(tmpDir)
-  echo &"PASS SC9.4 writeInterleavedShard: K=1, 4 shards VCF, {orig} records"
-
-

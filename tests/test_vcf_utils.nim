@@ -1,7 +1,10 @@
 ## Tests for vcf_utils.nim — BGZF I/O (V1), format sniffing (V2), file format sniffing (V3).
 ## Run from project root: nim c -r tests/test_vcf_utils.nim
 
+echo "--------------- Test VCF Utils ---------------"
+
 import std/[os, strformat]
+import test_utils
 import "../src/vcfparty/vcf_utils"
 
 # libdeflate CRC32 — already linked via -ldeflate in vcf_utils
@@ -41,7 +44,7 @@ proc readFileSlice(path: string; start: int64; length: int): seq[byte] =
 # V1.1 — scanBgzfBlockStarts: offsets valid, first=0, last block is 28-byte EOF
 # ---------------------------------------------------------------------------
 
-block testScanBlockStarts:
+timed("V1.1", "scanBgzfBlockStarts: offsets valid, first=0, last is EOF"):
   let starts = scanBgzfBlockStarts(SmallVcf)
   doAssert starts.len >= 2,
     &"expected >= 2 blocks (data + EOF), got {starts.len}"
@@ -55,25 +58,23 @@ block testScanBlockStarts:
   let blkSize = bgzfBlockSize(lastHdr)
   doAssert blkSize == 28,
     &"expected EOF block of 28 bytes, got {blkSize}"
-  echo "PASS V1.1 scanBgzfBlockStarts: offsets valid, first=0, last is EOF"
 
 # ---------------------------------------------------------------------------
 # V1.2 — scanBgzfBlockStarts range: range-limited scan truncates correctly
 # ---------------------------------------------------------------------------
 
-block testScanRange:
+timed("V1.2", "scanBgzfBlockStarts range: truncates at upper bound"):
   let allStarts = scanBgzfBlockStarts(SmallVcf)
   doAssert allStarts.len >= 2
   let first = scanBgzfBlockStarts(SmallVcf, 0, allStarts[1])
   doAssert first == @[allStarts[0]],
     &"range scan: expected [{allStarts[0]}], got {first}"
-  echo "PASS V1.2 scanBgzfBlockStarts range: truncates at upper bound"
 
 # ---------------------------------------------------------------------------
 # V1.3 — rawCopyBytes: copied bytes match source slice exactly
 # ---------------------------------------------------------------------------
 
-block testRawCopyBytes:
+timed("V1.3", "rawCopyBytes: copied bytes match source"):
   let starts = scanBgzfBlockStarts(SmallVcf)
   let hdr = readFileSlice(SmallVcf, starts[0], 18)
   let blkSize = bgzfBlockSize(hdr)
@@ -91,13 +92,12 @@ block testRawCopyBytes:
   for i in 0 ..< blkSize:
     doAssert got[i].byte == expected[i],
       &"rawCopyBytes: mismatch at byte {i}"
-  echo "PASS V1.3 rawCopyBytes: copied bytes match source"
 
 # ---------------------------------------------------------------------------
 # V1.4 — compressToBgzf/decompressBgzf round-trip
 # ---------------------------------------------------------------------------
 
-block testRoundTrip:
+timed("V1.4", "compressToBgzf/decompressBgzf: round-trip"):
   let original = "Hello, BGZF world!\nSecond line.\n"
   let origBytes = cast[seq[byte]](original)
   let compressed = compressToBgzf(origBytes)
@@ -108,24 +108,22 @@ block testRoundTrip:
   let decompressed = decompressBgzf(compressed)
   doAssert decompressed == origBytes,
     &"round-trip mismatch: {decompressed} != {origBytes}"
-  echo "PASS V1.4 compressToBgzf/decompressBgzf: round-trip"
 
 # ---------------------------------------------------------------------------
 # V1.5 — round-trip empty: empty input compresses and decompresses correctly
 # ---------------------------------------------------------------------------
 
-block testRoundTripEmpty:
+timed("V1.5", "round-trip empty: empty input"):
   let compressed = compressToBgzf(@[])
   doAssert bgzfBlockSize(compressed) > 0, "empty compress: invalid block header"
   let decompressed = decompressBgzf(compressed)
   doAssert decompressed.len == 0, "empty round-trip: expected empty result"
-  echo "PASS V1.5 round-trip empty: empty input"
 
 # ---------------------------------------------------------------------------
 # V1.6 — decompressBgzf fixture: real fixture block starts with '#'
 # ---------------------------------------------------------------------------
 
-block testDecompressFixture:
+timed("V1.6", "decompressBgzf fixture: real block decompresses"):
   let starts = scanBgzfBlockStarts(SmallVcf)
   var dataStart = -1'i64
   var dataSize  = 0
@@ -142,7 +140,6 @@ block testDecompressFixture:
   doAssert decompressed.len > 0, "decompressed data block is empty"
   doAssert decompressed[0] == byte('#') or decompressed[0] == byte('c'),
     &"unexpected first byte: {decompressed[0]}"
-  echo "PASS V1.6 decompressBgzf fixture: real block decompresses"
 
 # V1.7-V1.11 (splitChunk, bcfFirstDataOffset, splitBcfBoundaryBlock) removed:
 # these procs no longer exist after Milestone V — scatter splits exclusively
@@ -154,7 +151,7 @@ block testDecompressFixture:
 # V1.12 — BGZF CRC32 validation: stored CRC matches computed value
 # ---------------------------------------------------------------------------
 
-block testBgzfCrc32Validation:
+timed("V1.12", "BGZF CRC32: stored matches computed"):
   doAssert fileExists(SmallVcf), "fixture missing"
   let starts = scanBgzfBlockStarts(SmallVcf)
   var testOff = -1'i64
@@ -177,7 +174,6 @@ block testBgzfCrc32Validation:
   doAssert storedCrc != 0, "stored CRC32 should be non-zero for real data"
   doAssert storedCrc == computedCrc,
     &"BGZF CRC32 mismatch: stored={storedCrc:#x} computed={computedCrc:#x}"
-  echo "PASS V1.12 BGZF CRC32: stored matches computed"
 
 # ===========================================================================
 # V2 — Format sniffing: isBgzfStream, sniffFormat, sniffStreamFormat
@@ -187,7 +183,7 @@ block testBgzfCrc32Validation:
 # V2.1 — isBgzfStream: BGZF magic detected; plain gzip and random bytes rejected
 # ---------------------------------------------------------------------------
 
-block testIsBgzfStream:
+timed("V2.1", "isBgzfStream: BGZF magic detected, non-BGZF rejected"):
   let bgzfHead = [0x1f'u8, 0x8b, 0x08, 0x04, 0x00]
   doAssert isBgzfStream(bgzfHead), "should detect BGZF magic"
 
@@ -200,13 +196,11 @@ block testIsBgzfStream:
   let short = [0x1f'u8, 0x8b]
   doAssert not isBgzfStream(short), "too-short buffer is not BGZF"
 
-  echo "PASS V2.1 isBgzfStream: BGZF magic detected, non-BGZF rejected"
-
 # ---------------------------------------------------------------------------
 # V2.2 — sniffFormat: BCF/VCF/text detected from uncompressed bytes
 # ---------------------------------------------------------------------------
 
-block testSniffFormat:
+timed("V2.2", "sniffFormat: BCF/VCF/text detected correctly"):
   let bcfBytes = [byte('B'), byte('C'), byte('F'), 0x02'u8, 0x02'u8, 0x00'u8]
   doAssert sniffFormat(bcfBytes) == ffBcf, "BCF magic -> ffBcf"
 
@@ -225,13 +219,11 @@ block testSniffFormat:
   let bcfExact = [byte('B'), byte('C'), byte('F'), 0x02'u8, 0x02'u8]
   doAssert sniffFormat(bcfExact) == ffBcf, "exact BCF magic length -> ffBcf"
 
-  echo "PASS V2.2 sniffFormat: BCF/VCF/text detected correctly"
-
 # ---------------------------------------------------------------------------
 # V2.3 — sniffStreamFormat BCF: small.bcf detected as BCF/BGZF
 # ---------------------------------------------------------------------------
 
-block testSniffStreamFormatBcf:
+timed("V2.3", "sniffStreamFormat: BCF/BGZF"):
   doAssert fileExists(SmallBcf), "BCF fixture missing"
   let f = open(SmallBcf, fmRead)
   var buf = newSeq[byte](65536)
@@ -241,13 +233,12 @@ block testSniffStreamFormatBcf:
   let (fmt, isBgzf) = sniffStreamFormat(buf)
   doAssert fmt == ffBcf,  &"small.bcf: expected ffBcf, got {fmt}"
   doAssert isBgzf,         "small.bcf: expected BGZF stream"
-  echo "PASS V2.3 sniffStreamFormat: BCF/BGZF"
 
 # ---------------------------------------------------------------------------
 # V2.4 — sniffStreamFormat VCF: small.vcf.gz detected as VCF/BGZF
 # ---------------------------------------------------------------------------
 
-block testSniffStreamFormatVcf:
+timed("V2.4", "sniffStreamFormat: VCF/BGZF"):
   doAssert fileExists(SmallVcf), "VCF fixture missing"
   let f = open(SmallVcf, fmRead)
   var buf = newSeq[byte](65536)
@@ -257,39 +248,36 @@ block testSniffStreamFormatVcf:
   let (fmt, isBgzf) = sniffStreamFormat(buf)
   doAssert fmt == ffVcf,  &"small.vcf.gz: expected ffVcf, got {fmt}"
   doAssert isBgzf,         "small.vcf.gz: expected BGZF stream"
-  echo "PASS V2.4 sniffStreamFormat: VCF/BGZF"
 
 # ---------------------------------------------------------------------------
 # V2.5 — sniffStreamFormat text: plain text detected as text/uncompressed
 # ---------------------------------------------------------------------------
 
-block testSniffStreamFormatText:
+timed("V2.5", "sniffStreamFormat: text/uncompressed"):
   var raw: seq[byte]
   for c in "col1\tcol2\tcol3\nhello\tworld\t42\n":
     raw.add(byte(c))
   let (fmt, isBgzf) = sniffStreamFormat(raw)
   doAssert fmt == ffText, &"plain text: expected ffText, got {fmt}"
   doAssert not isBgzf,    "plain text: should not be BGZF"
-  echo "PASS V2.5 sniffStreamFormat: text/uncompressed"
 
 # ---------------------------------------------------------------------------
 # V2.6 — sniffStreamFormat uncompressed VCF: VCF/uncompressed
 # ---------------------------------------------------------------------------
 
-block testSniffStreamFormatUncompressedVcf:
+timed("V2.6", "sniffStreamFormat: uncompressed VCF"):
   var raw: seq[byte]
   for c in "##fileformatVCFv4.2\n##source=vcfparty\n#CHROM\tPOS\n":
     raw.add(byte(c))
   let (fmt, isBgzf) = sniffStreamFormat(raw)
   doAssert fmt == ffVcf,  &"uncompressed VCF: expected ffVcf, got {fmt}"
   doAssert not isBgzf,    "uncompressed VCF: should not be BGZF"
-  echo "PASS V2.6 sniffStreamFormat: uncompressed VCF"
 
 # ---------------------------------------------------------------------------
 # V2.7 — sniffStreamFormat compressed text: BGZF text detected as text/BGZF
 # ---------------------------------------------------------------------------
 
-block testSniffStreamFormatCompressedText:
+timed("V2.7", "sniffStreamFormat: BGZF-compressed text"):
   var raw: seq[byte]
   for c in "hello world\n":
     raw.add(byte(c))
@@ -297,7 +285,6 @@ block testSniffStreamFormatCompressedText:
   let (fmt, isBgzf) = sniffStreamFormat(compressed)
   doAssert fmt == ffText, &"BGZF text: expected ffText, got {fmt}"
   doAssert isBgzf,         "BGZF text: expected BGZF stream"
-  echo "PASS V2.7 sniffStreamFormat: BGZF-compressed text"
 
 # ===========================================================================
 # V3 — File format sniffing: sniffFileFormat
@@ -307,42 +294,39 @@ block testSniffStreamFormatCompressedText:
 # V3.1 — sniffFileFormat VCF BGZF: small.vcf.gz
 # ---------------------------------------------------------------------------
 
-block sniffVcfBgzf:
+timed("V3.1", "sniffFileFormat: VCF BGZF"):
   doAssert fileExists(SmallVcf), "fixture missing: " & SmallVcf
   let (fmt, compressed) = sniffFileFormat(SmallVcf)
   doAssert fmt == ffVcf,  "V3.1: expected ffVcf, got " & $fmt
   doAssert compressed,    "V3.1: expected compressed=true"
-  echo "PASS V3.1 sniffFileFormat: VCF BGZF"
 
 # ---------------------------------------------------------------------------
 # V3.2 — sniffFileFormat BCF BGZF: small.bcf
 # ---------------------------------------------------------------------------
 
-block sniffBcfBgzf:
+timed("V3.2", "sniffFileFormat: BCF BGZF"):
   doAssert fileExists(SmallBcf), "fixture missing: " & SmallBcf
   let (fmt, compressed) = sniffFileFormat(SmallBcf)
   doAssert fmt == ffBcf,  "V3.2: expected ffBcf, got " & $fmt
   doAssert compressed,    "V3.2: expected compressed=true"
-  echo "PASS V3.2 sniffFileFormat: BCF BGZF"
 
 # ---------------------------------------------------------------------------
 # V3.3 — sniffFileFormat uncompressed VCF
 # ---------------------------------------------------------------------------
 
-block sniffUncompressedVcf:
+timed("V3.3", "sniffFileFormat: uncompressed VCF"):
   let tmp = getTempDir() / "vcfparty_sniff_test_v3_3.vcf"
   writeFile(tmp, "##fileformat=VCFv4.1\n#CHROM\tPOS\tID\tREF\tALT\n")
   let (fmt, compressed) = sniffFileFormat(tmp)
   doAssert fmt == ffVcf,   "V3.3: expected ffVcf, got " & $fmt
   doAssert not compressed, "V3.3: expected compressed=false"
   removeFile(tmp)
-  echo "PASS V3.3 sniffFileFormat: uncompressed VCF"
 
 # ---------------------------------------------------------------------------
 # V3.4 — sniffFileFormat uncompressed BCF (magic bytes only)
 # ---------------------------------------------------------------------------
 
-block sniffUncompressedBcf:
+timed("V3.4", "sniffFileFormat: uncompressed BCF magic"):
   let tmp = getTempDir() / "vcfparty_sniff_test_v3_4.bcf_raw"
   let magic: seq[byte] = @[byte('B'), byte('C'), byte('F'), 0x02'u8, 0x02'u8]
   var f = open(tmp, fmWrite)
@@ -352,4 +336,3 @@ block sniffUncompressedBcf:
   doAssert fmt == ffBcf,   "V3.4: expected ffBcf, got " & $fmt
   doAssert not compressed, "V3.4: expected compressed=false"
   removeFile(tmp)
-  echo "PASS V3.4 sniffFileFormat: uncompressed BCF magic"

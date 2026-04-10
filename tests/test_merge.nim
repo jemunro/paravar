@@ -2,21 +2,23 @@
 ## Run from project root: nim c -r tests/test_merge.nim
 ## Requires: tests/data/small.vcf.gz, tests/data/small.bcf
 
-import std/[os, osproc, sequtils, strformat, strutils, tempfiles]
+echo "--------------- Test Merge ---------------"
+
+import std/[os, osproc, strformat, strutils, tempfiles]
+import test_utils
 
 const DataDir  = "tests/data"
 const SmallVcf = DataDir / "small.vcf.gz"
 const SmallBcf = DataDir / "small.bcf"
 const BinPath  = "./vcfparty"
 
-block buildBinary:
+timed("MG0", "binary available"):
   if not fileExists(BinPath):
     let (outp, code) = execCmdEx("nimble build 2>&1")
     if code != 0:
       echo "nimble build failed:\n", outp
       quit(1)
   doAssert fileExists(BinPath), "binary not found: " & BinPath & " (run nimble build)"
-  echo "PASS MG0 binary available"
 
 proc runBin(args: string): (string, int) =
   execCmdEx(BinPath & " run " & args & " 2>&1")
@@ -66,7 +68,7 @@ proc isSortedVcf(path: string): bool =
 # ---------------------------------------------------------------------------
 # MG1 — VCF +merge+ 4 shards: bcftools view -Ov pipeline; sorted and complete
 # ---------------------------------------------------------------------------
-block testMergeVcf4Shards:
+timed("MG1", "+merge+ VCF: 4 shards, sorted"):
   doAssert fileExists(SmallVcf), &"VCF fixture missing: {SmallVcf}"
   let tmpDir = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
@@ -83,12 +85,11 @@ block testMergeVcf4Shards:
     &"MG1: record count mismatch: got {outCount}, expected {origCount}"
   doAssert isSortedVcf(outFile), "MG1: output is not sorted by (contig, pos)"
   removeDir(tmpDir)
-  echo &"PASS MG1 +merge+ VCF: 4 shards, {outCount} records, sorted"
 
 # ---------------------------------------------------------------------------
 # MG2 — BCF input, cat pipeline (BGZF pass-through): warning emitted, records present
 # ---------------------------------------------------------------------------
-block testMergeBcfCat:
+timed("MG2", "+merge+ BCF input: 4 shards, sorted"):
   doAssert fileExists(SmallBcf), &"BCF fixture missing: {SmallBcf}"
   let tmpDir = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
@@ -105,12 +106,11 @@ block testMergeBcfCat:
     &"MG2: BCF record count mismatch: got {outCount}, expected {origCount}"
   doAssert isSortedVcf(outFile), "MG2: BCF +merge+ output is not sorted"
   removeDir(tmpDir)
-  echo &"PASS MG2 +merge+ BCF input: 4 shards, {outCount} records, sorted"
 
 # ---------------------------------------------------------------------------
 # MG3 — Stdout output: no -o, output captured from stdout, records present
 # ---------------------------------------------------------------------------
-block testMergeStdout:
+timed("MG3", "+merge+ stdout: records present, sorted"):
   doAssert fileExists(SmallVcf), &"VCF fixture missing: {SmallVcf}"
   let tmpDir  = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
@@ -127,12 +127,11 @@ block testMergeStdout:
     &"MG3: stdout record count: got {outCount}, expected {origCount}"
   doAssert isSortedVcf(outFile), "MG3: stdout output is not sorted"
   removeDir(tmpDir)
-  echo &"PASS MG3 +merge+ stdout: {outCount} records, sorted"
 
 # ---------------------------------------------------------------------------
 # MG4 — cat pipeline (pipes always decompress): no BGZF warning, records correct
 # ---------------------------------------------------------------------------
-block testMergeCatPipeline:
+timed("MG4", "+merge+ cat pipeline: records present (no BGZF warning)"):
   doAssert fileExists(SmallVcf), &"VCF fixture missing: {SmallVcf}"
   let tmpDir  = createTempDir("vcfparty_", "")
   let outFile = tmpDir / "out.vcf"
@@ -149,5 +148,3 @@ block testMergeCatPipeline:
   doAssert outCount == origCount,
     &"MG4: cat record count: got {outCount}, expected {origCount}"
   removeDir(tmpDir)
-  echo &"PASS MG4 +merge+ cat pipeline: {outCount} records present (no BGZF warning)"
-

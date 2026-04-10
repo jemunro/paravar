@@ -1,8 +1,11 @@
 ## Tests for gather.nim — G1: types, inferFileFormat, validateGatherConfig.
 ## Run from project root: nim c -d:debug -r tests/test_gather.nim
 
+echo "--------------- Test Gather ---------------"
+
 import std/[os, osproc, options, strformat, strutils, tempfiles]
 import std/posix
+import test_utils
 import "../src/vcfparty/gather"
 import "../src/vcfparty/vcf_utils"
 
@@ -35,7 +38,7 @@ if paramCount() >= 1:
 # G1.1 — testInferAllExtensions: all valid extensions (happy paths)
 # ---------------------------------------------------------------------------
 
-block testInferAllExtensions:
+timed("G1.1", "inferFileFormat: all extensions"):
   block:
     let (f, c) = inferFileFormat("out.vcf.gz", "")
     doAssert f == ffVcf,          &".vcf.gz: expected ffVcf, got {f}"
@@ -72,13 +75,12 @@ block testInferAllExtensions:
     let (f, c) = inferFileFormat("out.xyz", "")
     doAssert f == ffText,         &".xyz: expected ffText (unknown ext), got {f}"
     doAssert c == compNone, &".xyz: expected compNone, got {c}"
-  echo "PASS G1.1 inferFileFormat: all extensions"
 
 # ---------------------------------------------------------------------------
 # G1.2 — testInferWithOverride: fmtOverride overrides format, compression from extension
 # ---------------------------------------------------------------------------
 
-block testInferWithOverride:
+timed("G1.2", "inferFileFormat: fmtOverride overrides format"):
   # Override format; compression still from path extension.
   block:
     let (f, c) = inferFileFormat("out.vcf.gz", "bcf")
@@ -93,17 +95,15 @@ block testInferWithOverride:
     let (f, c) = inferFileFormat("out.xyz", "vcf")
     doAssert f == ffVcf and c == compNone,
       &".xyz + --gather-fmt vcf: got ({f}, {c})"
-  echo "PASS G1.2 inferFileFormat: fmtOverride overrides format"
 
 # ---------------------------------------------------------------------------
 # G1.3 — testValidateConfigOk: non-conflicting configs pass
 # ---------------------------------------------------------------------------
 
-block testValidateConfigOk:
+timed("G1.3", "validateGatherConfig: non-conflicting configs pass"):
   validateGatherConfig(GatherConfig())                                              # neither set
   validateGatherConfig(GatherConfig(format: ffText, headerPattern: some("#")))     # text + pattern
   validateGatherConfig(GatherConfig(format: ffText, headerN: some(3)))             # text + n
-  echo "PASS G1.3 validateGatherConfig: non-conflicting configs pass"
 
 # ---------------------------------------------------------------------------
 # G1 — exit-1 paths via subprocess (G1.4–G1.7)
@@ -112,53 +112,48 @@ block testValidateConfigOk:
 const SelfSrc   = "tests/test_gather.nim"
 const HelperBin = "/tmp/vcfparty_test_gather_helper"
 
-block buildHelper:
+timed("G1.0", "buildHelper: compiled exit-1 test helper"):
   let (outp, code) = execCmdEx(
     "nim c -d:debug -o:" & HelperBin & " " & SelfSrc & " 2>&1")
   doAssert code == 0, "failed to compile test helper:\n" & outp
-  echo "PASS G1.0 buildHelper: compiled exit-1 test helper"
 
 # ---------------------------------------------------------------------------
 # G1.4 — testInferBadOverride: invalid fmtOverride exits 1
 # ---------------------------------------------------------------------------
 
-block testInferBadOverride:
+timed("G1.4", "inferFileFormat: invalid fmtOverride exits 1"):
   let (_, code) = execCmdEx(HelperBin & " --exit-test-bad-override 2>/dev/null")
   doAssert code != 0, "invalid fmtOverride should exit non-zero"
-  echo "PASS G1.4 inferFileFormat: invalid fmtOverride exits 1"
 
 # ---------------------------------------------------------------------------
 # G1.5 — testMutualExclusion: --header-pattern + --header-n exits 1
 # ---------------------------------------------------------------------------
 
-block testMutualExclusion:
+timed("G1.5", "validateGatherConfig: --header-pattern + --header-n exits 1"):
   let (_, code) = execCmdEx(HelperBin & " --exit-test-mutual-exclusion 2>/dev/null")
   doAssert code != 0, "--header-pattern + --header-n should exit non-zero"
-  echo "PASS G1.5 validateGatherConfig: --header-pattern + --header-n exits 1"
 
 # ---------------------------------------------------------------------------
 # G1.6 — testVcfHeaderFlagRejected: --header-pattern rejected for VCF format
 # ---------------------------------------------------------------------------
 
-block testVcfHeaderFlagRejected:
+timed("G1.6", "validateGatherConfig: --header-pattern rejected for VCF format"):
   let (_, code) = execCmdEx(HelperBin & " --exit-test-vcf-header-flag 2>/dev/null")
   doAssert code != 0, "--header-pattern with VCF should exit non-zero"
-  echo "PASS G1.6 validateGatherConfig: --header-pattern rejected for VCF format"
 
 # ---------------------------------------------------------------------------
 # G1.7 — testBcfHeaderFlagRejected: --header-n rejected for BCF format
 # ---------------------------------------------------------------------------
 
-block testBcfHeaderFlagRejected:
+timed("G1.7", "validateGatherConfig: --header-n rejected for BCF format"):
   let (_, code) = execCmdEx(HelperBin & " --exit-test-bcf-header-flag 2>/dev/null")
   doAssert code != 0, "--header-n with BCF should exit non-zero"
-  echo "PASS G1.7 validateGatherConfig: --header-n rejected for BCF format"
 
 # ---------------------------------------------------------------------------
 # G3.1 — testFindBcfHeaderEnd: offset past magic+l_text+header text returned correctly
 # ---------------------------------------------------------------------------
 
-block testFindBcfHeaderEnd:
+timed("G2.1", "findBcfHeaderEnd"):
   # Buffer shorter than 9 bytes → -1.
   doAssert findBcfHeaderEnd(@[0x42'u8, 0x43, 0x46]) == -1, "short: expected -1"
 
@@ -183,13 +178,11 @@ block testFindBcfHeaderEnd:
   doAssert findBcfHeaderEnd(buf2) == expected,
     "header + records: expected same headerEnd"
 
-  echo "PASS G2.1 findBcfHeaderEnd"
-
 # ---------------------------------------------------------------------------
 # G3.2 — testFindVcfHeaderEnd: data start offset returned; all-hash returns -1
 # ---------------------------------------------------------------------------
 
-block testFindVcfHeaderEnd:
+timed("G2.2", "findVcfHeaderEnd"):
   # All '#' lines, no data → -1.
   var allHash: seq[byte]
   for c in "##format=VCFv4.2\n#CHROM\tPOS\n": allHash.add(byte(c))
@@ -219,13 +212,11 @@ block testFindVcfHeaderEnd:
   doAssert findVcfHeaderEnd(midData) == midDataStart,
     &"mid-data-line: expected {midDataStart}, got {findVcfHeaderEnd(midData)}"
 
-  echo "PASS G2.2 findVcfHeaderEnd"
-
 # ---------------------------------------------------------------------------
 # G3.3 — testStripBcfHeader: record bytes returned after stripping magic+l_text+header
 # ---------------------------------------------------------------------------
 
-block testStripBcfHeader:
+timed("G2.3", "stripBcfHeader"):
   # Build minimal fake uncompressed BCF: magic(5) + l_text(4) + header + records.
   let hdrText = "##BCF fake header\n"
   let lText = hdrText.len.uint32
@@ -248,13 +239,11 @@ block testStripBcfHeader:
   let hdrOnly = bcfData[0 ..< bcfData.len - recordBytes.len]
   doAssert stripBcfHeader(hdrOnly) == @[], "header-only: expected @[]"
 
-  echo "PASS G2.3 stripBcfHeader"
-
 # ---------------------------------------------------------------------------
 # G3.4 — testStripLinesByPattern: leading lines matching prefix removed; no-match unchanged
 # ---------------------------------------------------------------------------
 
-block testStripLinesByPattern:
+timed("G2.4", "stripLinesByPattern"):
   var data: seq[byte]
   for c in "##header1\n##header2\nrecord1\nrecord2\n":
     data.add(byte(c))
@@ -279,13 +268,11 @@ block testStripLinesByPattern:
   for c in "data\n": e2.add(byte(c))
   doAssert stripLinesByPattern(d2, "#") == e2, "single-char strip: unexpected result"
 
-  echo "PASS G2.4 stripLinesByPattern"
-
 # ---------------------------------------------------------------------------
 # G3.5 — testStripFirstNLines: first N lines removed; strip 0 unchanged; strip > total empty
 # ---------------------------------------------------------------------------
 
-block testStripFirstNLines:
+timed("G2.5", "stripFirstNLines"):
   var data: seq[byte]
   for c in "line1\nline2\nline3\nline4\n": data.add(byte(c))
 
@@ -306,13 +293,11 @@ block testStripFirstNLines:
   for c in "data": e3.add(byte(c))
   doAssert stripFirstNLines(d2, 1) == e3, "partial last line: unexpected result"
 
-  echo "PASS G2.5 stripFirstNLines"
-
 # ---------------------------------------------------------------------------
 # G3.6 — testRunInterceptorBcfStrip: BCF header stripped via pipe (shard 1)
 # ---------------------------------------------------------------------------
 
-block testRunInterceptorBcfStrip:
+timed("G2.6", "runInterceptor: BCF header stripping"):
   let hdrText = "##BCF header\n"
   let lText = hdrText.len.uint32
   var bcfData: seq[byte]
@@ -346,13 +331,12 @@ block testRunInterceptorBcfStrip:
 
   doAssert outBuf == records,
     &"BCF interceptor strip: expected records only, got {outBuf}"
-  echo "PASS G2.6 runInterceptor: BCF header stripping"
 
 # ---------------------------------------------------------------------------
 # G3.7 — testRunInterceptorVcfStrip: VCF header stripped via pipe (shard 1)
 # ---------------------------------------------------------------------------
 
-block testRunInterceptorVcfStrip:
+timed("G2.7", "runInterceptor: VCF header stripping"):
   var vcfData: seq[byte]
   for c in "##fileformat=VCFv4.2\n#CHROM\tPOS\n1\t100\n":
     vcfData.add(byte(c))
@@ -386,13 +370,12 @@ block testRunInterceptorVcfStrip:
   for c in "1\t100\n": expected.add(byte(c))
   doAssert outBuf == expected,
     &"VCF interceptor strip: expected data lines only, got {outBuf}"
-  echo "PASS G2.7 runInterceptor: VCF header stripping"
 
 # ---------------------------------------------------------------------------
 # G3.8 — testRunInterceptorHeaderN: --header-n strips first N lines via pipe (shard 1)
 # ---------------------------------------------------------------------------
 
-block testRunInterceptorHeaderN:
+timed("G2.8", "runInterceptor: text header stripping (--header-n)"):
   var data: seq[byte]
   for c in "hdr1\nhdr2\ndata1\ndata2\n": data.add(byte(c))
 
@@ -420,13 +403,12 @@ block testRunInterceptorHeaderN:
   for c in "data1\ndata2\n": expected.add(byte(c))
   doAssert outBuf == expected,
     &"header-n strip: expected data lines only, got {outBuf}"
-  echo "PASS G2.8 runInterceptor: text header stripping (--header-n)"
 
 # ---------------------------------------------------------------------------
 # G3.9 — testRunInterceptorNoStrip: text with no flags passes through unchanged (shard 1)
 # ---------------------------------------------------------------------------
 
-block testRunInterceptorNoStrip:
+timed("G2.9", "runInterceptor: no-strip pass-through"):
   # Text format with no flags: stream passes through unchanged.
   var data: seq[byte]
   for c in "##header\nrecord1\nrecord2\n": data.add(byte(c))
@@ -452,13 +434,12 @@ block testRunInterceptorNoStrip:
   removeFile(TmpPass)
 
   doAssert outBuf == data, "no-strip: text stream should pass through unchanged"
-  echo "PASS G2.9 runInterceptor: no-strip pass-through"
 
 # ---------------------------------------------------------------------------
 # G4.1 — testRecompressUncompressedToBgzf: uncompressed → BGZF via runInterceptor (shard 0)
 # ---------------------------------------------------------------------------
 
-block testRecompressUncompressedToBgzf:
+timed("G3.1", "runInterceptor: recompress uncompressed to BGZF"):
   var raw: seq[byte]
   for c in "col1\tcol2\nhello\tworld\n": raw.add(byte(c))
 
@@ -481,13 +462,12 @@ block testRecompressUncompressedToBgzf:
   doAssert isBgzfStream(outBuf), "recomp: output should be BGZF"
   doAssert decompressAllBgzfBlocks(outBuf) == raw,
     "recomp: decompressed content should match input"
-  echo "PASS G3.1 runInterceptor: recompress uncompressed to BGZF"
 
 # ---------------------------------------------------------------------------
 # G4.2 — testDecompressBgzfToUncompressed: BGZF → uncompressed via runInterceptor (shard 0)
 # ---------------------------------------------------------------------------
 
-block testDecompressBgzfToUncompressed:
+timed("G3.2", "runInterceptor: decompress BGZF to uncompressed"):
   var raw: seq[byte]
   for c in "col1\tcol2\nhello\tworld\n": raw.add(byte(c))
   let compressed = compressToBgzfMulti(raw)
@@ -510,13 +490,12 @@ block testDecompressBgzfToUncompressed:
 
   doAssert not isBgzfStream(outBuf), "decomp: output should not be BGZF"
   doAssert outBuf == raw, "decomp: output should be original uncompressed content"
-  echo "PASS G3.2 runInterceptor: decompress BGZF to uncompressed"
 
 # ---------------------------------------------------------------------------
 # G4.3 — testPassThroughBgzfToBgzf: BGZF → BGZF pass-through via runInterceptor (shard 0)
 # ---------------------------------------------------------------------------
 
-block testPassThroughBgzfToBgzf:
+timed("G3.3", "runInterceptor: pass-through BGZF to BGZF"):
   var raw: seq[byte]
   for c in "col1\tcol2\nhello\tworld\n": raw.add(byte(c))
   let compressed = compressToBgzfMulti(raw)
@@ -539,13 +518,12 @@ block testPassThroughBgzfToBgzf:
 
   doAssert outBuf == compressed,
     "BGZF pass-through: output bytes should be identical to input"
-  echo "PASS G3.3 runInterceptor: pass-through BGZF to BGZF"
 
 # ---------------------------------------------------------------------------
 # G4.4 — testShardStripAndRecompress: uncompressed VCF shard 1 stripped + recompressed to BGZF
 # ---------------------------------------------------------------------------
 
-block testShardStripAndRecompress:
+timed("G3.4", "runInterceptor: shard strip + BGZF recompression"):
   var vcfData: seq[byte]
   for c in "##fileformat=VCFv4.2\n#CHROM\tPOS\n1\t100\n": vcfData.add(byte(c))
 
@@ -578,13 +556,12 @@ block testShardStripAndRecompress:
   for c in "1\t100\n": e1.add(byte(c))
   doAssert decompressAllBgzfBlocks(outBuf) == e1,
     "strip+recomp: decompressed output should contain only data lines"
-  echo "PASS G3.4 runInterceptor: shard strip + BGZF recompression"
 
 # ---------------------------------------------------------------------------
 # G4.5 — testShardBgzfInputStripAndRecompress: BGZF VCF shard 1 stripped + recompressed to BGZF
 # ---------------------------------------------------------------------------
 
-block testShardBgzfInputStripAndRecompress:
+timed("G3.5", "runInterceptor: BGZF shard strip + recompression"):
   var raw: seq[byte]
   for c in "##fileformat=VCFv4.2\n#CHROM\tPOS\n1\t200\n": raw.add(byte(c))
   let compressed = compressToBgzfMulti(raw)
@@ -618,13 +595,282 @@ block testShardBgzfInputStripAndRecompress:
   for c in "1\t200\n": e2.add(byte(c))
   doAssert decompressAllBgzfBlocks(outBuf) == e2,
     "bgzf-strip+recomp: decompressed output should contain only data lines"
-  echo "PASS G3.5 runInterceptor: BGZF shard strip + recompression"
+
+# ---------------------------------------------------------------------------
+# G3.6 — runInterceptor streams: peak `pending` is bounded regardless of size
+# ---------------------------------------------------------------------------
+# Build a synthetic BGZF VCF substantially larger than the 1 MB flush
+# threshold (~5 MB decompressed), pipe it through runInterceptor as shard 0,
+# and assert that `gMaxPendingBytes` (the per-thread maximum size that the
+# `pending` accumulator ever reached) stays well below the total input size.
+# Without streaming this counter would equal the entire shard size; with
+# streaming it should be bounded to a flush window plus one read chunk.
+
+timed("G3.6", "streaming bounded peak pending"):
+  # Build header + ~6 MB of records.
+  var raw: seq[byte]
+  for c in "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n":
+    raw.add(byte(c))
+  let headerLen = raw.len
+  # Each record is ~25 bytes; 250_000 records gives ~6 MB of decompressed data.
+  for i in 1 .. 250_000:
+    let line = "1\t" & $i & "\trs" & $i & "\tA\tC\t30\tPASS\t.\n"
+    for c in line: raw.add(byte(c))
+  let totalDecompressed = raw.len
+  doAssert totalDecompressed > 5 * 1024 * 1024,
+    &"G3.6: synthetic input only {totalDecompressed} bytes — adjust generator"
+  let compressed = compressToBgzfMulti(raw)
+
+  # Pre-set the cross-shard globals as if shard 0 were running solo.
+  gDetectedFormat = ffVcf
+  gStreamIsBgzf   = true
+  gChromLine.ready = false
+  gChromLine.len   = 0
+
+  var fds: array[2, cint]
+  doAssert posix.pipe(fds) == 0
+  # Fork a child to write the compressed payload concurrently — the pipe
+  # buffer is far smaller than the payload, so a single-threaded write would
+  # deadlock (writer would block waiting for a reader that hasn't started yet).
+  let writerPid = posix.fork()
+  doAssert writerPid >= 0, "G3.6: fork() failed"
+  if writerPid == 0:
+    # Child: write payload, close, exit immediately.
+    discard posix.close(fds[0])
+    var written = 0
+    while written < compressed.len:
+      let n = posix.write(fds[1],
+                          cast[pointer](unsafeAddr compressed[written]),
+                          compressed.len - written)
+      if n <= 0: break
+      written += n
+    discard posix.close(fds[1])
+    exitnow(if written == compressed.len: 0 else: 1)
+  # Parent: close write-end and proceed to runInterceptor (read side).
+  discard posix.close(fds[1])
+
+  let tmpDir = createTempDir("vcfparty_g36_", "")
+  let tmpPath = tmpDir / "shard0.vcf.gz"
+  let cfg = GatherConfig(format: ffVcf, compression: compBgzf,
+                         outputPath: tmpPath, shardCount: 1, toStdout: false)
+  let rc = runInterceptor(cfg, shardIdx = 0, fds[0], tmpPath)
+  doAssert rc == 0, &"G3.6: runInterceptor returned {rc}"
+
+  # Reap the writer child.
+  var writerStatus: cint
+  discard posix.waitpid(writerPid, writerStatus, 0)
+  doAssert ((writerStatus shr 8) and 0xff) == 0, "G3.6: writer child failed"
+
+  # Streaming property: peak pending must be much smaller than the full shard.
+  # The flush threshold is 1 MB; bound is ~ flush threshold + one read chunk +
+  # one BGZF block (~64 KB).  4 MB is a generous upper bound that still proves
+  # we are nowhere near buffering the whole 5+ MB shard.
+  let peak = gMaxPendingBytes
+  doAssert peak > 0,
+    "G3.6: gMaxPendingBytes is zero — instrumentation not wired"
+  doAssert peak < 4 * 1024 * 1024,
+    &"G3.6: peak pending {peak} bytes exceeds 4 MB bound on a {totalDecompressed}-byte shard"
+  doAssert peak < totalDecompressed div 2,
+    &"G3.6: peak pending {peak} >= half of total shard {totalDecompressed} — not streaming"
+
+  # Sanity check: the temp file roundtrips back to the same record count.
+  let outStr = readFile(tmpPath)
+  var outBytes = newSeq[byte](outStr.len)
+  for i, c in outStr: outBytes[i] = byte(c)
+  let outRaw = decompressAllBgzfBlocks(outBytes)
+  var newlines = 0
+  for b in outRaw:
+    if b == byte('\n'): newlines += 1
+  # 2 header lines + 250_000 records.
+  doAssert newlines == 250_002,
+    &"G3.6: roundtrip newline count {newlines} != 250_002"
+
+  removeDir(tmpDir)
+
+# ---------------------------------------------------------------------------
+# G3.7 — runInterceptor BGZF→BGZF shard 0 fast path: zero re-encoding
+# ---------------------------------------------------------------------------
+# Build a synthetic ~6 MB BGZF VCF, drive runInterceptor as shard 0 with
+# compBgzf output, and assert that gReencodedBytes == 0.  Proves that the new
+# fast path is forwarding raw BGZF blocks (header included) instead of
+# re-encoding the whole shard via compressToBgzfMulti.
+
+proc buildSyntheticBgzfVcf(nRecords: int): (seq[byte], seq[byte]) =
+  ## Build a synthetic uncompressed VCF (header + nRecords records) and its
+  ## BGZF-compressed counterpart.  Returns (raw, compressed).
+  var raw: seq[byte]
+  for c in "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n":
+    raw.add(byte(c))
+  for i in 1 .. nRecords:
+    let line = "1\t" & $i & "\trs" & $i & "\tA\tC\t30\tPASS\t.\n"
+    for c in line: raw.add(byte(c))
+  result = (raw, compressToBgzfMulti(raw))
+
+proc pipeIntoInterceptor(compressed: seq[byte]; cfg: GatherConfig;
+                         shardIdx: int; tmpPath: string): int =
+  ## Spin up a forked writer to push `compressed` into a pipe, then drive
+  ## runInterceptor on the read side and reap the writer.  Returns the
+  ## interceptor's return code.
+  var fds: array[2, cint]
+  doAssert posix.pipe(fds) == 0, "pipeIntoInterceptor: pipe() failed"
+  let writerPid = posix.fork()
+  doAssert writerPid >= 0, "pipeIntoInterceptor: fork() failed"
+  if writerPid == 0:
+    discard posix.close(fds[0])
+    var written = 0
+    while written < compressed.len:
+      let n = posix.write(fds[1],
+                          cast[pointer](unsafeAddr compressed[written]),
+                          compressed.len - written)
+      if n <= 0: break
+      written += n
+    discard posix.close(fds[1])
+    exitnow(if written == compressed.len: 0 else: 1)
+  discard posix.close(fds[1])
+  let rc = runInterceptor(cfg, shardIdx, fds[0], tmpPath)
+  var status: cint
+  discard posix.waitpid(writerPid, status, 0)
+  doAssert ((status shr 8) and 0xff) == 0, "pipeIntoInterceptor: writer child failed"
+  return rc
+
+timed("G3.7", "BGZF->BGZF shard 0 fast path: 0 re-encoded bytes"):
+  let (raw, compressed) = buildSyntheticBgzfVcf(250_000)
+  doAssert raw.len > 5 * 1024 * 1024,
+    &"G3.7: synthetic input only {raw.len} bytes — adjust generator"
+
+  gDetectedFormat  = ffVcf
+  gStreamIsBgzf    = true
+  gChromLine.ready = false
+  gChromLine.len   = 0
+
+  let tmpDir  = createTempDir("vcfparty_g37_", "")
+  let tmpPath = tmpDir / "shard0.vcf.gz"
+  let cfg = GatherConfig(format: ffVcf, compression: compBgzf,
+                         outputPath: tmpPath, shardCount: 1, toStdout: false)
+  let rc = pipeIntoInterceptor(compressed, cfg, shardIdx = 0, tmpPath)
+  doAssert rc == 0, &"G3.7: runInterceptor returned {rc}"
+
+  doAssert gReencodedBytes == 0,
+    &"G3.7: shard 0 BGZF→BGZF re-encoded {gReencodedBytes} bytes — fast path is not active"
+
+  let outStr = readFile(tmpPath)
+  var outBytes = newSeq[byte](outStr.len)
+  for i, c in outStr: outBytes[i] = byte(c)
+  let outRaw = decompressAllBgzfBlocks(outBytes)
+  doAssert outRaw == raw,
+    &"G3.7: shard 0 output decompressed bytes ({outRaw.len}) != input bytes ({raw.len})"
+
+  removeDir(tmpDir)
+
+# ---------------------------------------------------------------------------
+# G3.8 — runInterceptor BGZF→BGZF shard 1 fast path: ≤ 1 BGZF block re-encoded
+# ---------------------------------------------------------------------------
+# Same fixture as G3.7; pre-set the cross-shard globals as a non-zero shard
+# would see them, then drive runInterceptor as shardIdx=1.  Assert that
+# gReencodedBytes is bounded by one BGZF block (the split block tail) and
+# that the temp file decompresses to exactly the post-header records.
+
+timed("G3.8", "BGZF->BGZF shard 1 fast path: bounded re-encoded bytes"):
+  let (raw, compressed) = buildSyntheticBgzfVcf(250_000)
+
+  # Pre-set the cross-shard globals as if shard 0 had already published its
+  # header detection and #CHROM line.
+  gDetectedFormat = ffVcf
+  gStreamIsBgzf   = true
+  let chromStr = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
+  gChromLine.len = chromStr.len.int32
+  for k in 0 ..< chromStr.len:
+    gChromLine.buf[k] = byte(chromStr[k])
+  gChromLine.ready = true
+
+  let tmpDir  = createTempDir("vcfparty_g38_", "")
+  let tmpPath = tmpDir / "shard1.vcf.gz"
+  let cfg = GatherConfig(format: ffVcf, compression: compBgzf,
+                         outputPath: tmpPath, shardCount: 1, toStdout: false)
+  let rc = pipeIntoInterceptor(compressed, cfg, shardIdx = 1, tmpPath)
+  doAssert rc == 0, &"G3.8: runInterceptor returned {rc}"
+
+  doAssert gReencodedBytes >= 0 and gReencodedBytes <= BGZF_MAX_BLOCK_SIZE,
+    &"G3.8: shard 1 re-encoded {gReencodedBytes} bytes — expected 0..{BGZF_MAX_BLOCK_SIZE}"
+
+  # The temp file should decompress to exactly the input's post-header records
+  # (everything after "##fileformat...\n#CHROM...\n").
+  var headerEnd = 0
+  var newlinesSeen = 0
+  while headerEnd < raw.len:
+    if raw[headerEnd] == byte('\n'):
+      newlinesSeen += 1
+      if newlinesSeen == 2:
+        headerEnd += 1
+        break
+    headerEnd += 1
+  let expectedRecords = raw[headerEnd ..< raw.len]
+
+  let outStr = readFile(tmpPath)
+  var outBytes = newSeq[byte](outStr.len)
+  for i, c in outStr: outBytes[i] = byte(c)
+  let outRaw = decompressAllBgzfBlocks(outBytes)
+  doAssert outRaw == expectedRecords,
+    &"G3.8: output records ({outRaw.len} bytes) != expected ({expectedRecords.len} bytes)"
+
+  removeDir(tmpDir)
+
+# ---------------------------------------------------------------------------
+# G3.9 — runInterceptor BGZF→BGZF shard 1 fast path: header on block boundary
+# ---------------------------------------------------------------------------
+# Compress the header alone (so it occupies one or more complete BGZF blocks),
+# then concatenate independently-compressed records.  When phase B finds the
+# header end at exactly a BGZF block boundary, the fast path's
+# `hEnd == splitBlockUncompStart` branch must trigger and re-encode nothing.
+
+timed("G3.9", "BGZF->BGZF shard 1 header-on-block-edge: 0 re-encoded bytes"):
+  var headerRaw: seq[byte]
+  for c in "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n":
+    headerRaw.add(byte(c))
+  var recordsRaw: seq[byte]
+  for i in 1 .. 50_000:
+    let line = "1\t" & $i & "\trs" & $i & "\tA\tC\t30\tPASS\t.\n"
+    for c in line: recordsRaw.add(byte(c))
+  # Header in its own BGZF block(s); records in their own BGZF block(s).
+  # Concatenating two valid BGZF streams produces a valid BGZF stream where
+  # the header decompressed length lands exactly at a block boundary.
+  let compressedHeader = compressToBgzfMulti(headerRaw)
+  let compressedRecords = compressToBgzfMulti(recordsRaw)
+  var compressed = compressedHeader
+  compressed.add(compressedRecords)
+
+  gDetectedFormat = ffVcf
+  gStreamIsBgzf   = true
+  let chromStr = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
+  gChromLine.len = chromStr.len.int32
+  for k in 0 ..< chromStr.len:
+    gChromLine.buf[k] = byte(chromStr[k])
+  gChromLine.ready = true
+
+  let tmpDir  = createTempDir("vcfparty_g39_", "")
+  let tmpPath = tmpDir / "shard1.vcf.gz"
+  let cfg = GatherConfig(format: ffVcf, compression: compBgzf,
+                         outputPath: tmpPath, shardCount: 1, toStdout: false)
+  let rc = pipeIntoInterceptor(compressed, cfg, shardIdx = 1, tmpPath)
+  doAssert rc == 0, &"G3.9: runInterceptor returned {rc}"
+
+  doAssert gReencodedBytes == 0,
+    &"G3.9: header-on-block-edge re-encoded {gReencodedBytes} bytes — expected 0"
+
+  let outStr = readFile(tmpPath)
+  var outBytes = newSeq[byte](outStr.len)
+  for i, c in outStr: outBytes[i] = byte(c)
+  let outRaw = decompressAllBgzfBlocks(outBytes)
+  doAssert outRaw == recordsRaw,
+    &"G3.9: output records ({outRaw.len} bytes) != expected ({recordsRaw.len} bytes)"
+
+  removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
 # G5.1 — testCleanupSuccess: success path — temp files and dir deleted
 # ---------------------------------------------------------------------------
 
-block testCleanupSuccess:
+timed("G4.1", "cleanupTempDir: success, files and dir deleted"):
   const TmpDir = "/tmp/vcfparty_test_g5_cleanup_ok"
   createDir(TmpDir)
   let f1 = TmpDir / "shard1.tmp"
@@ -637,13 +883,12 @@ block testCleanupSuccess:
   doAssert not fileExists(f1), "cleanup success: shard1 should be deleted"
   doAssert not fileExists(f2), "cleanup success: shard2 should be deleted"
   doAssert not dirExists(TmpDir), "cleanup success: tmpDir should be deleted"
-  echo "PASS G4.1 cleanupTempDir: success, files and dir deleted"
 
 # ---------------------------------------------------------------------------
 # G5.2 — testCleanupFailure: failure path — temp files preserved on disk
 # ---------------------------------------------------------------------------
 
-block testCleanupFailure:
+timed("G4.2", "cleanupTempDir: failure, files preserved"):
   const TmpDir = "/tmp/vcfparty_test_g5_cleanup_fail"
   createDir(TmpDir)
   let f1 = TmpDir / "shard1.tmp"
@@ -655,13 +900,12 @@ block testCleanupFailure:
   doAssert dirExists(TmpDir), "cleanup failure: dir should still exist"
   removeFile(f1)
   removeDir(TmpDir)
-  echo "PASS G4.2 cleanupTempDir: failure, files preserved"
 
 # ---------------------------------------------------------------------------
 # G5.3 — testConcatShardsUncompressed: two uncompressed shards concatenated, tmpDir cleaned
 # ---------------------------------------------------------------------------
 
-block testConcatShardsUncompressed:
+timed("G4.3", "concatenateShards: uncompressed"):
   const TmpDir  = "/tmp/vcfparty_test_g5_concat_unc"
   const OutPath = "/tmp/vcfparty_test_g5_out.txt"
   createDir(TmpDir)
@@ -680,13 +924,12 @@ block testConcatShardsUncompressed:
   doAssert not fileExists(shard2), "concat: shard2 should be deleted"
   doAssert not dirExists(TmpDir),  "concat: tmpDir should be deleted"
   removeFile(OutPath)
-  echo "PASS G4.3 concatenateShards: uncompressed"
 
 # ---------------------------------------------------------------------------
 # G5.4 — testConcatShardsBgzf: BGZF shards concatenated, single EOF block appended, tmpDir cleaned
 # ---------------------------------------------------------------------------
 
-block testConcatShardsBgzf:
+timed("G4.4", "concatenateShards: BGZF with EOF block"):
   const TmpDir  = "/tmp/vcfparty_test_g5_concat_bgzf"
   const OutPath = "/tmp/vcfparty_test_g5_out.bgzf"
   createDir(TmpDir)
@@ -737,7 +980,6 @@ block testConcatShardsBgzf:
   # Decompressed content must equal data1 ++ data2.
   doAssert decompressAllBgzfBlocks(outBuf) == data1 & data2,
     "concat bgzf: decompressed content mismatch"
-  echo "PASS G4.4 concatenateShards: BGZF with EOF block"
 
 # ===========================================================================
 # G5 — Integration tests via compiled binary
@@ -745,14 +987,13 @@ block testConcatShardsBgzf:
 
 const BinPath = "./vcfparty"
 
-block buildBinary:
+timed("G5.0", "binary available"):
   if not fileExists(BinPath):
     let (outp, code) = execCmdEx("nimble build 2>&1")
     if code != 0:
       echo "nimble build failed:\n", outp
       quit(1)
   doAssert fileExists(BinPath), "binary not found: " & BinPath
-  echo "PASS G5.0 binary available"
 
 proc countRecords(path: string): int =
   let (o, _) = execCmdEx("bcftools view -HG " & path & " 2>/dev/null | wc -l")
@@ -769,7 +1010,7 @@ proc runGather(args: string): (string, int) =
 # G7.1 — VCF gather, compressed pipeline (-Oz) → .vcf.gz
 # ---------------------------------------------------------------------------
 
-block testGatherVcfCompressed:
+timed("G5.1", "VCF gather -Oz: records, content hash matches"):
   let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.vcf.gz"
   let (outp, code) = runGather(
@@ -782,13 +1023,12 @@ block testGatherVcfCompressed:
   doAssert recordsHash(outPath) == recordsHash(SmallVcf),
     "VCF gather -Oz: content hash mismatch"
   removeDir(tmpDir)
-  echo &"PASS G5.1 VCF gather -Oz: {got} records, content hash matches"
 
 # ---------------------------------------------------------------------------
 # G7.2 — VCF gather, uncompressed pipeline (-Ov) → .vcf.gz (recompression)
 # ---------------------------------------------------------------------------
 
-block testGatherVcfRecompress:
+timed("G5.2", "VCF gather -Ov (recompress uncompressed->BGZF): hash matches"):
   let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.vcf.gz"
   let (outp, code) = runGather(
@@ -801,13 +1041,12 @@ block testGatherVcfRecompress:
   doAssert recordsHash(outPath) == recordsHash(SmallVcf),
     "VCF gather -Ov: content hash mismatch (recompression corrupted data)"
   removeDir(tmpDir)
-  echo &"PASS G5.2 VCF gather -Ov (recompress uncompressed→BGZF): {got} records, hash matches"
 
 # ---------------------------------------------------------------------------
 # G7.3 — BCF gather, compressed pipeline (-Ob) → .bcf
 # ---------------------------------------------------------------------------
 
-block testGatherBcfCompressed:
+timed("G5.3", "BCF gather -Ob: records, content hash matches"):
   let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.bcf"
   let (outp, code) = runGather(
@@ -820,13 +1059,12 @@ block testGatherBcfCompressed:
   doAssert recordsHash(outPath) == recordsHash(SmallBcf),
     "BCF gather -Ob: content hash mismatch"
   removeDir(tmpDir)
-  echo &"PASS G5.3 BCF gather -Ob: {got} records, content hash matches"
 
 # ---------------------------------------------------------------------------
 # G7.4 — BCF gather, uncompressed pipeline (-Ou) → .bcf (recompression)
 # ---------------------------------------------------------------------------
 
-block testGatherBcfRecompress:
+timed("G5.4", "BCF gather -Ou (recompress uncompressed->BGZF): hash matches"):
   let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.bcf"
   let (outp, code) = runGather(
@@ -839,13 +1077,12 @@ block testGatherBcfRecompress:
   doAssert recordsHash(outPath) == recordsHash(SmallBcf),
     "BCF gather -Ou: content hash mismatch (recompression corrupted data)"
   removeDir(tmpDir)
-  echo &"PASS G5.4 BCF gather -Ou (recompress uncompressed→BGZF): {got} records, hash matches"
 
 # ---------------------------------------------------------------------------
 # G7.5 — Text gather (bcftools query) → .txt, no stripping
 # ---------------------------------------------------------------------------
 
-block testGatherText:
+timed("G5.5", "text gather -> .txt: matches record count"):
   let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.txt"
   let (outp, code) = runGather(
@@ -858,13 +1095,12 @@ block testGatherText:
   doAssert lineCount == orig,
     &"text gather: expected {orig} lines, got {lineCount}"
   removeDir(tmpDir)
-  echo &"PASS G5.5 text gather → .txt: {lineCount} lines, matches record count"
 
 # ---------------------------------------------------------------------------
 # G7.6 — Text gather with --header-n 1: first line of shards 2..N stripped
 # ---------------------------------------------------------------------------
 
-block testGatherTextHeaderN:
+timed("G5.6", "text gather --header-n 1: 1 header + data lines"):
   # Pipeline prepends a fixed header line to each shard's output.
   # With --header-n 1, shards 2..4 should have their header line stripped.
   # Result: 1 header line + 5000 data lines = 5001 lines total.
@@ -885,13 +1121,12 @@ block testGatherTextHeaderN:
   doAssert firstLine.strip == "CHROM\tPOS",
     &"text gather --header-n 1: first line should be header, got: {firstLine.strip}"
   removeDir(tmpDir)
-  echo &"PASS G5.6 text gather --header-n 1: {lineCount} lines (1 header + {orig} data)"
 
 # ---------------------------------------------------------------------------
 # G7.7 — Unknown-extension gather: .out.gz → inferred as text + BGZF
 # ---------------------------------------------------------------------------
 
-block testGatherUnknownExt:
+timed("G5.7", "unknown-ext (.out.gz) text gather: valid BGZF"):
   # .out.gz is not a recognised VCF/BCF prefix → inferred as text, BGZF (from .gz).
   # No --gather-fmt needed under the new lenient inference rules.
   let tmpDir = createTempDir("vcfparty_", "")
@@ -915,13 +1150,12 @@ block testGatherUnknownExt:
   doAssert lineCount == orig,
     &"unknown-ext gather: expected {orig} lines, got {lineCount}"
   removeDir(tmpDir)
-  echo &"PASS G5.7 unknown-ext (.out.gz) text gather: {lineCount} lines, valid BGZF"
 
 # ---------------------------------------------------------------------------
 # G7.8 — Shard failure: temp files left on disk, exit 1, paths in stderr
 # ---------------------------------------------------------------------------
 
-block testGatherShardFailure:
+timed("G5.8", "shard failure: exit non-zero, temp paths printed"):
   let tmpDir  = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.vcf.gz"
   let (outp, code) = runGather(
@@ -931,7 +1165,6 @@ block testGatherShardFailure:
   doAssert "vcfparty_" in outp,
     &"shard failure: expected temp path in stderr, got:\n{outp}"
   removeDir(tmpDir)
-  echo "PASS G5.8 shard failure: exit non-zero, temp paths printed"
 
 # ---------------------------------------------------------------------------
 # G7.9 — --tmp-dir custom path
@@ -942,7 +1175,7 @@ block testGatherShardFailure:
 # G7.10 — testGatherTextHeaderPattern: --header-pattern strips matching lines from shards 2..N
 # ---------------------------------------------------------------------------
 
-block testGatherTextHeaderPattern:
+timed("G5.10", "text gather --header-pattern: 1 header + data lines"):
   # Pipeline prepends a "##"-prefixed header line to each shard's output.
   # With --header-pattern "##", shards 2..4 should have that line stripped.
   # Result: 1 header line + 5000 data lines = 5001 lines total.
@@ -963,7 +1196,6 @@ block testGatherTextHeaderPattern:
   doAssert firstLine.strip == "##CHROM\tPOS",
     &"text gather --header-pattern: first line should be header, got: {firstLine.strip}"
   removeDir(tmpDir)
-  echo &"PASS G5.10 text gather --header-pattern: {lineCount} lines (1 header + {orig} data)"
 
 # ===========================================================================
 # G6 — gather subcommand integration tests
@@ -976,7 +1208,7 @@ proc runGatherSubcmd(args: string): (string, int) =
 # G8.1 — VCF: scatter → gather, record count and hash match
 # ---------------------------------------------------------------------------
 
-block testGatherSubcmdVcf:
+timed("G6.1", "gather subcommand VCF: records, content hash matches"):
   let tmpDir = createTempDir("vcfparty_", "")
   let shardTemplate = tmpDir / "shard.{}.vcf.gz"
   # Scatter into 4 shards via CLI.
@@ -998,13 +1230,12 @@ block testGatherSubcmdVcf:
   doAssert recordsHash(outPath) == recordsHash(SmallVcf),
     "G8.1: content hash mismatch"
   removeDir(tmpDir)
-  echo &"PASS G6.1 gather subcommand VCF: {got} records, content hash matches"
 
 # ---------------------------------------------------------------------------
 # G8.2 — BCF: scatter → gather, record count and hash match
 # ---------------------------------------------------------------------------
 
-block testGatherSubcmdBcf:
+timed("G6.2", "gather subcommand BCF: records, content hash matches"):
   let tmpDir = createTempDir("vcfparty_", "")
   let (sOutp, sCode) = execCmdEx(
     BinPath & &" scatter -n 4 -o {tmpDir}/shard.bcf {SmallBcf} 2>&1")
@@ -1023,13 +1254,12 @@ block testGatherSubcmdBcf:
   doAssert recordsHash(outPath) == recordsHash(SmallBcf),
     "G8.2: content hash mismatch"
   removeDir(tmpDir)
-  echo &"PASS G6.2 gather subcommand BCF: {got} records, content hash matches"
 
 # ---------------------------------------------------------------------------
 # G8.3 — Omit -o: output goes to stdout (uncompressed VCF, record count matches)
 # ---------------------------------------------------------------------------
 
-block testGatherSubcmdStdout:
+timed("G6.3", "gather subcommand stdout: records written to stdout"):
   let tmpDir = createTempDir("vcfparty_", "")
   let (sOutp, sCode) = execCmdEx(
     BinPath & &" scatter -n 4 -o {tmpDir}/shard.vcf.gz {SmallVcf} 2>&1")
@@ -1048,25 +1278,23 @@ block testGatherSubcmdStdout:
   let orig = countRecords(SmallVcf)
   doAssert got == orig, &"G8.3: record count {got} != {orig}"
   removeDir(tmpDir)
-  echo &"PASS G6.3 gather subcommand stdout: {got} records written to stdout"
 
 # ---------------------------------------------------------------------------
 # G8.4 — No input files exits non-zero
 # ---------------------------------------------------------------------------
 
-block testGatherSubcmdNoInputs:
+timed("G6.4", "gather subcommand: no input files exits non-zero"):
   let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.vcf.gz"
   let (outp, code) = runGatherSubcmd(&"-o {outPath}")
   doAssert code != 0, "G8.4: no inputs should exit non-zero"
   removeDir(tmpDir)
-  echo "PASS G6.4 gather subcommand: no input files exits non-zero"
 
 # ---------------------------------------------------------------------------
 # G8.5 — Missing input file exits non-zero
 # ---------------------------------------------------------------------------
 
-block testGatherSubcmdMissingFile:
+timed("G6.5", "gather subcommand: missing input file exits non-zero"):
   let tmpDir = createTempDir("vcfparty_", "")
   let outPath = tmpDir / "out.vcf.gz"
   let (outp, code) = runGatherSubcmd(&"-o {outPath} /nonexistent/shard.vcf.gz")
@@ -1074,13 +1302,12 @@ block testGatherSubcmdMissingFile:
   doAssert "not found" in outp.toLowerAscii,
     &"G8.5: error should mention 'not found', got: {outp}"
   removeDir(tmpDir)
-  echo "PASS G6.5 gather subcommand: missing input file exits non-zero"
 
 # ---------------------------------------------------------------------------
 # G8.6 — run +concat+ without -o: output goes to stdout
 # ---------------------------------------------------------------------------
 
-block testRunGatherStdout:
+timed("G6.6", "run +concat+ stdout: records written to stdout"):
   let tmpDir = createTempDir("vcfparty_", "")
   let stdoutFile = tmpDir / "stdout.vcf"
   # No -o; stdout is captured via shell redirection.
@@ -1091,7 +1318,6 @@ block testRunGatherStdout:
   let orig = countRecords(SmallVcf)
   doAssert got == orig, &"G8.6: record count {got} != {orig}"
   removeDir(tmpDir)
-  echo &"PASS G6.6 run +concat+ stdout: {got} records written to stdout"
 
 # ===========================================================================
 # G7 — #CHROM header validation tests
@@ -1101,31 +1327,29 @@ block testRunGatherStdout:
 # S2.1 — extractChromLine: finds #CHROM in VCF header bytes
 # ---------------------------------------------------------------------------
 
-block testExtractChromLineVcf:
+timed("G7.1", "extractChromLine: found #CHROM in VCF header bytes"):
   var header: seq[byte]
   for c in "##fileformat=VCFv4.2\n##INFO=<ID=DP>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n":
     header.add(byte(c))
   let line = extractChromLine(header)
   doAssert line.startsWith("#CHROM"), &"S2.1: expected '#CHROM...' got '{line}'"
-  echo "PASS G7.1 extractChromLine: found #CHROM in VCF header bytes"
 
 # ---------------------------------------------------------------------------
 # S2.2 — extractChromLine: returns "" when not found
 # ---------------------------------------------------------------------------
 
-block testExtractChromLineNotFound:
+timed("G7.2", "extractChromLine: returns empty string when not found"):
   var data: seq[byte]
   for c in "##fileformat=VCFv4.2\n##INFO=<ID=DP>\n":
     data.add(byte(c))
   let line = extractChromLine(data)
   doAssert line == "", &"S2.2: expected '' got '{line}'"
-  echo "PASS G7.2 extractChromLine: returns empty string when not found"
 
 # ---------------------------------------------------------------------------
 # S2.3 — chromLineFromBytes: works on BGZF VCF file bytes
 # ---------------------------------------------------------------------------
 
-block testChromLineFromBytesVcf:
+timed("G7.3", "chromLineFromBytes: found #CHROM in BGZF VCF"):
   doAssert fileExists(SmallVcf), "S2.3: VCF fixture missing"
   let fileSize = getFileSize(SmallVcf).int
   var allBytes = newSeq[byte](fileSize)
@@ -1136,13 +1360,12 @@ block testChromLineFromBytesVcf:
   doAssert fmt == ffVcf, &"S2.3: expected ffVcf, got {fmt}"
   let line = chromLineFromBytes(allBytes, fmt, isBgzf)
   doAssert line.startsWith("#CHROM"), &"S2.3: expected '#CHROM...' got '{line}'"
-  echo "PASS G7.3 chromLineFromBytes: found #CHROM in BGZF VCF"
 
 # ---------------------------------------------------------------------------
 # S2.4 — chromLineFromBytes: works on BGZF BCF file bytes
 # ---------------------------------------------------------------------------
 
-block testChromLineFromBytesBcf:
+timed("G7.4", "chromLineFromBytes: found #CHROM in BGZF BCF"):
   doAssert fileExists(SmallBcf), "S2.4: BCF fixture missing"
   let fileSize = getFileSize(SmallBcf).int
   var allBytes = newSeq[byte](fileSize)
@@ -1153,13 +1376,12 @@ block testChromLineFromBytesBcf:
   doAssert fmt == ffBcf, &"S2.4: expected ffBcf, got {fmt}"
   let line = chromLineFromBytes(allBytes, fmt, isBgzf)
   doAssert line.startsWith("#CHROM"), &"S2.4: expected '#CHROM...' got '{line}'"
-  echo "PASS G7.4 chromLineFromBytes: found #CHROM in BGZF BCF"
 
 # ---------------------------------------------------------------------------
 # S2.5 — chromLineFromFile: matches chromLineFromBytes
 # ---------------------------------------------------------------------------
 
-block testChromLineFromFile:
+timed("G7.5", "chromLineFromFile: matches chromLineFromBytes result"):
   doAssert fileExists(SmallVcf), "S2.5: VCF fixture missing"
   let fileSize = getFileSize(SmallVcf).int
   var allBytes = newSeq[byte](fileSize)
@@ -1172,13 +1394,12 @@ block testChromLineFromFile:
   doAssert fromBytes == fromFile,
     &"S2.5: chromLineFromFile != chromLineFromBytes (got '{fromFile}' vs '{fromBytes}')"
   doAssert fromBytes.startsWith("#CHROM"), &"S2.5: expected '#CHROM...' got '{fromBytes}'"
-  echo "PASS G7.5 chromLineFromFile: matches chromLineFromBytes result"
 
 # ---------------------------------------------------------------------------
 # S2.6 — gather subcommand: matching #CHROM lines → success
 # ---------------------------------------------------------------------------
 
-block testGatherChromMatch:
+timed("G7.6", "gather #CHROM match: success"):
   let tmpDir = createTempDir("vcfparty_", "")
   let (sOutp, sCode) = execCmdEx(
     BinPath & &" scatter -n 2 -o {tmpDir}/shard.vcf.gz {SmallVcf} 2>&1")
@@ -1193,13 +1414,12 @@ block testGatherChromMatch:
   let orig = countRecords(SmallVcf)
   doAssert got == orig, &"S2.6: record count {got} != {orig}"
   removeDir(tmpDir)
-  echo &"PASS G7.6 gather #CHROM match: {got} records, success"
 
 # ---------------------------------------------------------------------------
 # S2.7 — gather subcommand: mismatched #CHROM → exit 1, no partial output
 # ---------------------------------------------------------------------------
 
-block testGatherChromMismatch:
+timed("G7.7", "gather #CHROM mismatch: exits 1, no partial output"):
   # Build two synthetic BGZF-VCF files with different sample columns.
   let tmpDir = createTempDir("vcfparty_", "")
   let vcfA =
@@ -1232,13 +1452,12 @@ block testGatherChromMismatch:
   doAssert "chrom" in gOutp.toLowerAscii or "mismatch" in gOutp.toLowerAscii,
     &"S2.7: error message should mention mismatch, got: {gOutp}"
   removeDir(tmpDir)
-  echo "PASS G7.7 gather #CHROM mismatch: exits 1, no partial output"
 
 # ---------------------------------------------------------------------------
 # G9 — extractContigTable
 # ---------------------------------------------------------------------------
 
-block testExtractContigTableVcf:
+timed("G9.1", "extractContigTable VCF: contigs extracted in order"):
   ## Read small.vcf.gz (BGZF VCF) and verify contigs are extracted in order.
   let f = open(SmallVcf, fmRead)
   var buf = newSeq[byte](1024 * 1024)  # 1 MB — enough for the whole file
@@ -1250,9 +1469,8 @@ block testExtractContigTableVcf:
   doAssert contigs[0] == "chr1", &"M1 VCF: contigs[0] = {contigs[0]}, expected chr1"
   doAssert contigs[1] == "chr2", &"M1 VCF: contigs[1] = {contigs[1]}, expected chr2"
   doAssert contigs[2] == "chr3", &"M1 VCF: contigs[2] = {contigs[2]}, expected chr3"
-  echo &"PASS G9.1 extractContigTable VCF: {contigs.len} contigs, first = {contigs[0]}"
 
-block testExtractContigTableBcf:
+timed("G9.2", "extractContigTable BCF: contigs extracted in order"):
   ## Read small.bcf (BGZF BCF) and verify contigs are extracted in order.
   let f = open(SmallBcf, fmRead)
   var buf = newSeq[byte](1024 * 1024)
@@ -1264,24 +1482,21 @@ block testExtractContigTableBcf:
   doAssert contigs[0] == "chr1", &"M1 BCF: contigs[0] = {contigs[0]}, expected chr1"
   doAssert contigs[1] == "chr2", &"M1 BCF: contigs[1] = {contigs[1]}, expected chr2"
   doAssert contigs[2] == "chr3", &"M1 BCF: contigs[2] = {contigs[2]}, expected chr3"
-  echo &"PASS G9.2 extractContigTable BCF: {contigs.len} contigs, first = {contigs[0]}"
 
-block testExtractContigTableEmpty:
+timed("G9.3", "extractContigTable empty input: 0 contigs"):
   ## Empty input → empty result.
   let contigs = extractContigTable(@[])
   doAssert contigs.len == 0, &"M1 empty: expected 0 contigs, got {contigs.len}"
-  echo "PASS G9.3 extractContigTable empty input: 0 contigs"
 
-block testExtractContigTableNoContigs:
+timed("G9.4", "extractContigTable no ##contig lines: 0 contigs"):
   ## VCF header with no ##contig lines → empty result.
   let header = "##fileformat=VCFv4.2\n##FILTER=<ID=PASS,Description=\"All filters passed\">\n#CHROM\tPOS\tID\n"
   var bytes = newSeq[byte](header.len)
   for i in 0 ..< header.len: bytes[i] = byte(header[i])
   let contigs = extractContigTable(bytes)
   doAssert contigs.len == 0, &"M1 no-contig: expected 0, got {contigs.len}"
-  echo "PASS G9.4 extractContigTable no ##contig lines: 0 contigs"
 
-block testExtractContigTableSynthetic:
+timed("G9.5", "extractContigTable synthetic 3-contig header: order preserved"):
   ## Synthetic VCF with multiple ##contig lines in a specific order.
   let header = "##fileformat=VCFv4.2\n##contig=<ID=chrX,length=100>\n##contig=<ID=chrY,length=200>\n##contig=<ID=chrM,length=300>\n#CHROM\tPOS\n"
   var bytes = newSeq[byte](header.len)
@@ -1289,7 +1504,6 @@ block testExtractContigTableSynthetic:
   let contigs = extractContigTable(bytes)
   doAssert contigs == @["chrX", "chrY", "chrM"],
     &"M1 synthetic: expected [chrX,chrY,chrM], got {contigs}"
-  echo "PASS G9.5 extractContigTable synthetic 3-contig header: order preserved"
 
 # ---------------------------------------------------------------------------
 # G10 — readNextVcfRecord and readNextBcfRecord
@@ -1301,7 +1515,7 @@ proc makePipe(): (cint, cint) =
   doAssert posix.pipe(fds) == 0, "pipe() failed"
   result = (fds[0], fds[1])
 
-block testReadNextVcfRecordBasic:
+timed("G10.1", "readNextVcfRecord: 3 lines read correctly, EOF returns empty"):
   ## Three VCF lines → readNextVcfRecord reads each in order; EOF → empty.
   let lines = "chr1\t100\t.\tA\tT\t.\tPASS\t.\n" &
               "chr1\t200\t.\tG\tC\t.\tPASS\t.\n" &
@@ -1326,18 +1540,16 @@ block testReadNextVcfRecordBasic:
   doAssert s2.startsWith("chr1\t200"), &"M2 VCF r2 content: {s2}"
   let s3 = cast[string](r3)
   doAssert s3.startsWith("chr2\t50"), &"M2 VCF r3 content: {s3}"
-  echo "PASS G10.1 readNextVcfRecord: 3 lines read correctly, EOF returns empty"
 
-block testReadNextVcfRecordEmpty:
+timed("G10.2", "readNextVcfRecord: empty input returns empty seq"):
   ## Empty pipe → EOF immediately.
   let (rfd, wfd) = makePipe()
   discard posix.close(wfd)
   let rec = readNextVcfRecord(rfd)
   discard posix.close(rfd)
   doAssert rec.len == 0, "M2 VCF empty: expected empty"
-  echo "PASS G10.2 readNextVcfRecord: empty input returns empty seq"
 
-block testReadNextBcfRecordBasic:
+timed("G10.3", "readNextBcfRecord: 2 records read correctly, EOF returns empty"):
   ## Synthetic BCF records: two records with known fields.
   ## Record layout: l_shared(4 LE) + l_indiv(4 LE) + shared bytes + indiv bytes.
   ## We use l_shared=8, l_indiv=0 with CHROM=0(int32) POS=99(int32) as shared data.
@@ -1381,13 +1593,12 @@ block testReadNextBcfRecordBasic:
   # Verify CHROM in r2.
   let c2 = int32(r2[8].uint32 or (r2[9].uint32 shl 8) or (r2[10].uint32 shl 16) or (r2[11].uint32 shl 24))
   doAssert c2 == 1'i32, &"M2 BCF r2 CHROM: {c2}"
-  echo "PASS G10.3 readNextBcfRecord: 2 records read correctly, EOF returns empty"
 
 # ---------------------------------------------------------------------------
 # G11 — extractSortKey
 # ---------------------------------------------------------------------------
 
-block testExtractSortKeyVcf:
+timed("G11.1", "extractSortKey VCF: rank and 0-based pos correct"):
   ## VCF records: verify contig rank and 0-based pos.
   let contigs = @["chr1", "chr2", "chr3"]
 
@@ -1411,9 +1622,7 @@ block testExtractSortKeyVcf:
   let (rankU, _) = extractSortKey(vcfRec("chrX", 1), ffVcf, contigs)
   doAssert rankU == high(int), &"M3 VCF unknown contig rank: {rankU}"
 
-  echo "PASS G11.1 extractSortKey VCF: rank and 0-based pos correct"
-
-block testExtractSortKeyBcf:
+timed("G11.2", "extractSortKey BCF: rank and pos from correct offsets"):
   ## BCF records: CHROM at offset 8, POS at offset 12 of the full record bytes.
   let contigs = @["chr1", "chr2", "chr3"]
 
@@ -1441,9 +1650,7 @@ block testExtractSortKeyBcf:
   let (rankU, _) = extractSortKey(bcfRec(99'i32, 0'i32), ffBcf, contigs)
   doAssert rankU == high(int), &"M3 BCF out-of-range chromId rank: {rankU}"
 
-  echo "PASS G11.2 extractSortKey BCF: rank and pos from correct offsets"
-
-block testExtractSortKeyRealVcf:
+timed("G11.3", "extractSortKey real VCF: sort key consistent"):
   ## Read first data record from small.vcf.gz and verify sort key is consistent.
   let (outp, code) = execCmdEx("bcftools view -HG " & SmallVcf & " 2>/dev/null | head -1")
   doAssert code == 0, "M3 real VCF: bcftools failed"
@@ -1462,13 +1669,12 @@ block testExtractSortKeyRealVcf:
     if contigs[ci] == chrom: expectedRank = ci; break
   doAssert rank == expectedRank, &"M3 real VCF rank: {rank} != {expectedRank} (chrom={chrom})"
   doAssert pos == int32(vcfPos - 1), &"M3 real VCF pos: {pos} != {vcfPos - 1}"
-  echo &"PASS G11.3 extractSortKey real VCF: {chrom}:{vcfPos} → rank={rank} pos={pos}"
 
 # ---------------------------------------------------------------------------
 # G12 — kWayMerge
 # ---------------------------------------------------------------------------
 
-block testKWayMergeVcfTwoStreams:
+timed("G12.1", "kWayMerge VCF: 2 streams merged in sorted order, all 6 records"):
   ## Merge 2 sorted VCF streams: output sorted and contains all records.
   let contigs = @["chr1", "chr2"]
   proc vcfRec(chrom: string; pos: int): seq[byte] =
@@ -1510,9 +1716,8 @@ block testKWayMergeVcfTwoStreams:
   for i, pfx in expectedPfx:
     doAssert resultLines[i].startsWith(pfx),
       &"M4.1: record {i}: expected '{pfx}', got '{resultLines[i]}'"
-  echo "PASS G12.1 kWayMerge VCF: 2 streams merged in sorted order, all 6 records"
 
-block testKWayMergeSingleStream:
+timed("G12.2", "kWayMerge VCF single stream: passthrough, order preserved"):
   ## Single stream → output equals input (passthrough).
   let contigs = @["chr1", "chr2"]
   proc vcfRec(chrom: string; pos: int): seq[byte] =
@@ -1542,9 +1747,8 @@ block testKWayMergeSingleStream:
   doAssert resultLines.len == 2, &"M4.2: expected 2 records, got {resultLines.len}"
   doAssert resultLines[0].startsWith("chr1\t10"),  &"M4.2: record 0: {resultLines[0]}"
   doAssert resultLines[1].startsWith("chr2\t20"),  &"M4.2: record 1: {resultLines[1]}"
-  echo "PASS G12.2 kWayMerge VCF single stream: passthrough, order preserved"
 
-block testKWayMergeBcfTwoStreams:
+timed("G12.3", "kWayMerge BCF: 2 streams merged in sorted order, all 4 records"):
   ## Merge 2 sorted BCF streams (synthetic records); output sorted and complete.
   let contigs = @["chr1", "chr2"]
   proc bcfRec(chromId: int32; pos: int32): seq[byte] =
@@ -1597,5 +1801,3 @@ block testKWayMergeBcfTwoStreams:
     let base = i * 16
     doAssert leI32(raw, base + 8)  == expChrom, &"M4.3: rec {i} CHROM: {leI32(raw, base+8)}"
     doAssert leI32(raw, base + 12) == expPos,   &"M4.3: rec {i} POS: {leI32(raw, base+12)}"
-  echo "PASS G12.3 kWayMerge BCF: 2 streams merged in sorted order, all 4 records"
-
