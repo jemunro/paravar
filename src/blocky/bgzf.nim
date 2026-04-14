@@ -3,7 +3,7 @@
 ## Only external dependency: libdeflate (-ldeflate), no htslib required.
 ## All proc signatures use explicit types per project style guide.
 
-import std/[algorithm, os, strformat, strutils]
+import std/[algorithm, os, posix, strformat, strutils]
 
 # ---------------------------------------------------------------------------
 # Verbose logging — enabled by -v flag, shared across all modules
@@ -214,6 +214,57 @@ proc rawCopyBytes*(srcPath: string; dst: File; start: int64; length: int64) =
     if nRead == 0: break
     discard dst.writeBytes(buf, 0, nRead)
     remaining -= nRead.int64
+
+# ---------------------------------------------------------------------------
+# sendfile(2) — zero-copy fd-to-fd transfer
+# ---------------------------------------------------------------------------
+
+when defined(linux):
+  proc c_sendfile*(outFd, inFd: cint; offset: ptr Off; count: csize_t): int
+    {.importc: "sendfile", header: "<sys/sendfile.h>".}
+
+proc sendfileAll*(outFd, inFd: cint; count: Off) =
+  ## Copy count bytes from inFd to outFd using sendfile (Linux) or read/write.
+  when defined(linux):
+    var offset: Off = 0
+    while offset < count:
+      let sent = c_sendfile(outFd, inFd, addr offset, csize_t(count - offset))
+      if sent <= 0: break
+  else:
+    const BufSize = 65536
+    var buf = newSeqUninit[byte](BufSize)
+    var remaining = count
+    while remaining > 0:
+      let toRead = min(remaining, BufSize.Off)
+      let n = posix.read(inFd, addr buf[0], toRead.int)
+      if n <= 0: break
+      var written = 0
+      while written < n:
+        let w = posix.write(outFd, addr buf[written], n - written)
+        if w <= 0: break
+        written += w
+      remaining -= n.Off
+
+proc rawCopyBytesFd*(srcPath: string; dstFd: cint; start: int64; length: int64) =
+  ## Copy length bytes from srcPath[start..] to dstFd using sendfile on Linux,
+  ## falling back to read/write on other platforms.
+  if length <= 0: return
+  let srcFd = posix.open(srcPath.cstring, O_RDONLY)
+  if srcFd < 0:
+    quit("rawCopyBytesFd: could not open " & srcPath, 1)
+  defer: discard posix.close(srcFd)
+  when defined(linux):
+    # sendfile with non-NULL offset reads from the specified offset, not the
+    # fd's current position.  Pass start directly instead of using lseek.
+    var offset: Off = start.Off
+    var remaining = length.Off
+    while remaining > 0:
+      let sent = c_sendfile(dstFd, srcFd, addr offset, csize_t(remaining))
+      if sent <= 0: break
+      remaining -= sent.Off
+  else:
+    discard posix.lseek(srcFd, start.Off, SEEK_SET)
+    sendfileAll(dstFd, srcFd, length.Off)
 
 proc decompressBgzf*(data: openArray[byte]): seq[byte] =
   ## Decompress the first BGZF block in data; return the uncompressed bytes.

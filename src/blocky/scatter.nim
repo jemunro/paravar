@@ -53,6 +53,15 @@ type ShardTask* = object
   logLine:      string      ## pre-formatted info line; printed when writing begins
   decompress*:  bool        ## if true, decompress BGZF blocks before writing
 
+proc writeAllFd(fd: cint; data: openArray[byte]) {.gcsafe.} =
+  ## Write all bytes to fd via posix.write.  Used instead of File.writeBytes
+  ## in the non-decompress path to avoid buffer conflicts with sendfile.
+  var written = 0
+  while written < data.len:
+    let n = posix.write(fd, unsafeAddr data[written], data.len - written)
+    if n <= 0: break
+    written += n
+
 proc doWriteShard*(task: ShardTask): int {.gcsafe.} =
   ## Write one shard to its output fd.  Returns 0.  Designed for use with
   ## spawn so that multiple shards can be written in parallel.
@@ -63,10 +72,10 @@ proc doWriteShard*(task: ShardTask): int {.gcsafe.} =
   ## so the receiver gets a raw uncompressed byte stream.
   if task.logLine.len > 0:
     stderr.writeLine "info: " & task.logLine
-  var f: File
-  discard open(f, FileHandle(task.outFd), fmWrite)
-  try:
-    if task.decompress:
+  if task.decompress:
+    var f: File
+    discard open(f, FileHandle(task.outFd), fmWrite)
+    try:
       let prependRaw = decompressBgzfBytes(task.prepend)
       discard f.writeBytes(prependRaw, 0, prependRaw.len)
       if task.rawEnd > task.rawStart:
@@ -75,17 +84,19 @@ proc doWriteShard*(task: ShardTask): int {.gcsafe.} =
       if task.boundaryHead.len > 0:
         let headRaw = decompressBgzfBytes(task.boundaryHead)
         discard f.writeBytes(headRaw, 0, headRaw.len)
-      # No BGZF EOF block — the receiver gets a plain byte stream.
-    else:
-      discard f.writeBytes(task.prepend, 0, task.prepend.len)
-      if task.rawEnd > task.rawStart:
-        rawCopyBytes(task.vcfPath, f, task.rawStart, task.rawEnd - task.rawStart)
-      if task.boundaryHead.len > 0:
-        discard f.writeBytes(task.boundaryHead, 0, task.boundaryHead.len)
-      discard f.writeBytes(task.eofSeq, 0, task.eofSeq.len)
-  except IOError:
-    discard  # broken pipe — child exited early; failure detected via waitpid
-  try: f.close() except IOError: discard
+    except IOError:
+      discard
+    try: f.close() except IOError: discard
+  else:
+    # fd-level writes + sendfile — no File wrapper to avoid buffer conflicts.
+    writeAllFd(task.outFd, task.prepend)
+    if task.rawEnd > task.rawStart:
+      rawCopyBytesFd(task.vcfPath, task.outFd, task.rawStart,
+                      task.rawEnd - task.rawStart)
+    if task.boundaryHead.len > 0:
+      writeAllFd(task.outFd, task.boundaryHead)
+    writeAllFd(task.outFd, task.eofSeq)
+    discard posix.close(task.outFd)
   return 0
 
 # ---------------------------------------------------------------------------

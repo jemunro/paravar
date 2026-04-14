@@ -516,6 +516,43 @@ proc interceptShard*(shardIdx: int; inputFd: cint; tmpPath: string;
 # Direct-file gather
 # ---------------------------------------------------------------------------
 
+proc gatherShardSendfile(outFile: File; shardPath: string;
+                         fmt: FileFormat) =
+  ## Write one BGZF shard 1..N to outFile with header stripping, using sendfile
+  ## for the post-header data blocks.  Only the header-containing blocks are
+  ## read into memory; the bulk of the data is copied in kernel space.
+  let fileSize = getFileSize(shardPath)
+  let dataEnd = fileSize - 28  # skip trailing BGZF EOF
+  let f = open(shardPath, fmRead)
+  defer: f.close()
+  # Scan header blocks: decompress until we find where the header ends.
+  var blockPos: int64 = 0
+  var decompAccum = newSeqOfCap[byte](2 * 1024 * 1024)
+  var headerEnd = -1
+  var hdrBuf = newSeqUninit[byte](BGZF_MAX_BLOCK_SIZE + BGZF_OVERHEAD)
+  while blockPos < dataEnd and headerEnd < 0:
+    f.setFilePos(blockPos)
+    if readBytes(f, hdrBuf, 0, 18) < 18: break
+    let blkSize = bgzfBlockSize(hdrBuf)
+    if blkSize <= 0: break
+    if blkSize > hdrBuf.len: hdrBuf.setLen(blkSize)
+    f.setFilePos(blockPos)
+    if readBytes(f, hdrBuf, 0, blkSize) < blkSize: break
+    decompAccum.add(decompressBgzf(hdrBuf.toOpenArray(0, blkSize - 1)))
+    blockPos += blkSize.int64
+    headerEnd =
+      if fmt == ffBcf: findBcfHeaderEnd(decompAccum)
+      else:            findVcfHeaderEnd(decompAccum)
+  if headerEnd < 0: headerEnd = decompAccum.len
+  # Write recompressed post-header tail of the boundary block.
+  let tail = decompAccum[headerEnd ..< decompAccum.len]
+  if tail.len > 0:
+    compressToBgzfMulti(outFile, tail)
+  # Sendfile remaining data blocks directly from file.
+  if blockPos < dataEnd:
+    outFile.flushFile()
+    rawCopyBytesFd(shardPath, getFileHandle(outFile).cint, blockPos, dataEnd - blockPos)
+
 proc gatherFiles*(cfg: GatherConfig; inputPaths: seq[string]) =
   ## Concatenate pre-existing shard files into cfg.outputPath (or stdout).
   ## Shard 0 is written with its header intact; shards 1..N have headers stripped.
@@ -555,16 +592,21 @@ proc gatherFiles*(cfg: GatherConfig; inputPaths: seq[string]) =
   let bytes0 = if isBgzf: stripTrailingEof(s0Bytes) else: s0Bytes
   writeShardZero(outFile, bytes0, isBgzf, cfg.compression)
 
-  # Write shards 1..N: read fresh from disk, strip headers.
+  # Write shards 1..N: strip headers, copy data blocks.
   for j in 1 ..< inputPaths.len:
-    let jSize = getFileSize(inputPaths[j]).int
-    var allBytes = newSeqUninit[byte](jSize)
-    block:
-      let fj = open(inputPaths[j], fmRead)
-      discard readBytes(fj, allBytes, 0, jSize)
-      fj.close()
-    let bytes = if isBgzf: stripTrailingEof(allBytes) else: allBytes
-    writeShardData(outFile, bytes, fmt, isBgzf, cfg.compression)
+    if isBgzf and cfg.compression == compBgzf:
+      # Optimised: read only header blocks, sendfile the rest.
+      gatherShardSendfile(outFile, inputPaths[j], fmt)
+    else:
+      # Fallback: in-memory path for cross-format or decompression cases.
+      let jSize = getFileSize(inputPaths[j]).int
+      var allBytes = newSeqUninit[byte](jSize)
+      block:
+        let fj = open(inputPaths[j], fmRead)
+        discard readBytes(fj, allBytes, 0, jSize)
+        fj.close()
+      let bytes = if isBgzf: stripTrailingEof(allBytes) else: allBytes
+      writeShardData(outFile, bytes, fmt, isBgzf, cfg.compression)
 
   if cfg.compression == compBgzf:
     discard outFile.writeBytes(BGZF_EOF, 0, BGZF_EOF.len)

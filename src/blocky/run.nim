@@ -190,14 +190,6 @@ proc waitFor*(q: DepositQueue; idx: int): string =
   slot.ready.store(false, moRelease)
 
 # ---------------------------------------------------------------------------
-# sendfile(2) — zero-copy fd-to-fd transfer (Linux only)
-# ---------------------------------------------------------------------------
-
-when defined(linux):
-  proc c_sendfile(outFd, inFd: cint; offset: ptr Off; count: csize_t): int
-    {.importc: "sendfile", header: "<sys/sendfile.h>".}
-
-# ---------------------------------------------------------------------------
 # Subprocess fork/exec
 # ---------------------------------------------------------------------------
 
@@ -327,28 +319,6 @@ proc workerProc*(tasksPtr: ptr seq[ShardTask]; nTotalShards: int;
 # ---------------------------------------------------------------------------
 # Concat thread — appends tmp files to output fd in shard order
 # ---------------------------------------------------------------------------
-
-proc sendfileAll(outFd, inFd: cint; count: Off) =
-  ## Copy count bytes from inFd to outFd using sendfile (Linux) or read/write.
-  when defined(linux):
-    var offset: Off = 0
-    while offset < count:
-      let sent = c_sendfile(outFd, inFd, addr offset, csize_t(count - offset))
-      if sent <= 0: break
-  else:
-    const BufSize = 65536
-    var buf = newSeqUninit[byte](BufSize)
-    var remaining = count
-    while remaining > 0:
-      let toRead = min(remaining, BufSize.Off)
-      let n = posix.read(inFd, addr buf[0], toRead.int)
-      if n <= 0: break
-      var written = 0
-      while written < n:
-        let w = posix.write(outFd, addr buf[written], n - written)
-        if w <= 0: break
-        written += w
-      remaining -= n.Off
 
 proc concatProc*(depositsPtr: ptr DepositQueue; outFd: cint;
                  nTotalShards: int; forceUncompress: bool): int {.gcsafe.} =
