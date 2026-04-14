@@ -411,6 +411,9 @@ proc runCompress(rawArgs: seq[string]) =
     outFile = stdout
   else:
     outPath = inputFile & ".gz"
+    if fileExists(outPath):
+      stderr.writeLine "error: output file already exists: " & outPath
+      quit(1)
     outFile = open(outPath, fmWrite)
 
   bgzfCompressStream(inFile, outFile)
@@ -419,6 +422,7 @@ proc runCompress(rawArgs: seq[string]) =
     inFile.close()
   if not toStdout:
     outFile.close()
+    removeFile(inputFile)
 
 proc runDecompress(rawArgs: seq[string]) =
   var toStdout = false
@@ -471,6 +475,9 @@ proc runDecompress(rawArgs: seq[string]) =
   if toStdout:
     outFile = stdout
   else:
+    if fileExists(outPath):
+      stderr.writeLine "error: output file already exists: " & outPath
+      quit(1)
     outFile = open(outPath, fmWrite)
 
   bgzfDecompressStream(inFile, outFile)
@@ -479,6 +486,7 @@ proc runDecompress(rawArgs: seq[string]) =
     inFile.close()
   if not toStdout:
     outFile.close()
+    removeFile(inputFile)
 
 proc mainEntry*() =
   ## Top-level entry point: dispatch to the appropriate subcommand.

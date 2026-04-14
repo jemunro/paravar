@@ -439,11 +439,12 @@ timed("CL40.1", "compress/decompress round-trip: file identity"):
   doAssert dec == 0, "failed to decompress fixture"
   let origData = readFile(rawPath)
 
-  # Compress.
+  # Compress — should create .gz and remove original.
   let (cOut, cCode) = run(&"compress {rawPath}")
   doAssert cCode == 0, &"CL40.1: compress failed: {cOut}"
   let gzPath = rawPath & ".gz"
   doAssert fileExists(gzPath), "CL40.1: compressed file not created"
+  doAssert not fileExists(rawPath), "CL40.1: original not removed after compress"
 
   # Verify BGZF magic.
   let gzData = readFile(gzPath)
@@ -451,10 +452,11 @@ timed("CL40.1", "compress/decompress round-trip: file identity"):
   doAssert gzData[0].byte == 0x1f and gzData[1].byte == 0x8b,
     "CL40.1: missing gzip magic"
 
-  # Decompress.
+  # Decompress — should create raw file and remove .gz.
   let (dOut, dCode) = run(&"decompress {gzPath}")
   doAssert dCode == 0, &"CL40.1: decompress failed: {dOut}"
   doAssert fileExists(rawPath), "CL40.1: decompressed file not created"
+  doAssert not fileExists(gzPath), "CL40.1: .gz not removed after decompress"
   let roundTrip = readFile(rawPath)
   doAssert roundTrip == origData,
     &"CL40.1: round-trip mismatch: orig={origData.len} got={roundTrip.len}"
@@ -512,5 +514,47 @@ timed("CL40.5", "decompress: non-.gz file without -c exits 1"):
   let (outp, code) = run(&"decompress {rawPath}")
   doAssert code != 0, &"CL40.5: expected non-zero exit, got {code}: {outp}"
   doAssert ".gz" in outp, &"CL40.5: error should mention .gz, got: {outp}"
+  removeDir(tmpDir)
+
+# ---------------------------------------------------------------------------
+# CL40.6 — compress: output already exists -> exits 1, original untouched
+# ---------------------------------------------------------------------------
+
+timed("CL40.6", "compress: output exists -> exits 1"):
+  let tmpDir = createTempDir("vcfparty_", "")
+  let rawPath = tmpDir / "small.vcf"
+  let gzPath = rawPath & ".gz"
+  discard execCmdEx(&"bgzip -d -c {SmallVcf} > {rawPath}")
+  writeFile(gzPath, "existing")  # pre-existing output
+  let origSize = getFileSize(rawPath)
+  let (outp, code) = run(&"compress {rawPath}")
+  doAssert code != 0, &"CL40.6: expected non-zero exit, got {code}: {outp}"
+  doAssert "already exists" in outp, &"CL40.6: error should mention 'already exists', got: {outp}"
+  doAssert fileExists(rawPath), "CL40.6: original should not be removed"
+  doAssert getFileSize(rawPath) == origSize, "CL40.6: original should be untouched"
+  doAssert readFile(gzPath) == "existing", "CL40.6: existing .gz should be untouched"
+  removeDir(tmpDir)
+
+# ---------------------------------------------------------------------------
+# CL40.7 — decompress: output already exists -> exits 1, original untouched
+# ---------------------------------------------------------------------------
+
+timed("CL40.7", "decompress: output exists -> exits 1"):
+  let tmpDir = createTempDir("vcfparty_", "")
+  let rawPath = tmpDir / "small.vcf"
+  let gzPath = rawPath & ".gz"
+  # Create a valid .gz file to decompress.
+  discard execCmdEx(&"bgzip -d -c {SmallVcf} > {rawPath}")
+  discard execCmdEx(&"{BinPath} compress {rawPath}")
+  doAssert fileExists(gzPath), "CL40.7: setup failed"
+  # Pre-create the output file to trigger the conflict.
+  writeFile(rawPath, "existing")
+  let origGzSize = getFileSize(gzPath)
+  let (outp, code) = run(&"decompress {gzPath}")
+  doAssert code != 0, &"CL40.7: expected non-zero exit, got {code}: {outp}"
+  doAssert "already exists" in outp, &"CL40.7: error should mention 'already exists', got: {outp}"
+  doAssert fileExists(gzPath), "CL40.7: .gz should not be removed"
+  doAssert getFileSize(gzPath) == origGzSize, "CL40.7: .gz should be untouched"
+  doAssert readFile(rawPath) == "existing", "CL40.7: existing output should be untouched"
   removeDir(tmpDir)
 
