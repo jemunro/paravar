@@ -187,32 +187,6 @@ proc chromLineFromFile*(path: string; fmt: FileFormat; isBgzf: bool): string =
       return extractChromLine(decompBuf[0 ..< hEnd])
   return extractChromLine(decompBuf)
 
-proc extractInputHeaderBytes*(path: string): seq[byte] =
-  ## Read and return the decompressed header bytes (up to first data record)
-  ## from a VCF.gz or BCF input file.  BGZF blocks are decompressed in chunks.
-  let fmt = if path.endsWith(".bcf"): ffBcf else: ffVcf
-  let f = open(path, fmRead)
-  defer: f.close()
-  const BufSize = 65536
-  var buf      = newSeqUninit[byte](BufSize)
-  var rawBuf:    seq[byte]
-  var decompBuf: seq[byte]
-  var blockPos = 0
-  while decompBuf.len < 10 * 1024 * 1024:
-    let got = readBytes(f, buf, 0, BufSize)
-    if got <= 0: break
-    rawBuf.add(buf.toOpenArray(0, got.int - 1))
-    while blockPos + 18 <= rawBuf.len:
-      let blkSize = bgzfBlockSize(rawBuf.toOpenArray(blockPos, rawBuf.high))
-      if blkSize <= 0 or blockPos + blkSize > rawBuf.len: break
-      decompBuf.add(decompressBgzf(rawBuf.toOpenArray(blockPos, blockPos + blkSize - 1)))
-      blockPos += blkSize
-    let hEnd =
-      if fmt == ffBcf: findBcfHeaderEnd(decompBuf)
-      else:            findVcfHeaderEnd(decompBuf)
-    if hEnd >= 0: return decompBuf[0 ..< hEnd]
-  result = decompBuf
-
 # ---------------------------------------------------------------------------
 # Shared shard-writing helpers
 # ---------------------------------------------------------------------------

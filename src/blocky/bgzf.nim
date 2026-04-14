@@ -199,22 +199,6 @@ proc scanBgzfBlockStarts*(path: string; startAt: int64 = 0;
     result.add(cur)
     cur += blkSize.int64
 
-proc rawCopyBytes*(srcPath: string; dst: File; start: int64; length: int64) =
-  ## Copy length bytes from srcPath starting at start into the open file dst.
-  ## Uses 4 MiB read chunks for I/O efficiency.
-  let src = open(srcPath, fmRead)
-  defer: src.close()
-  src.setFilePos(start)
-  const ChunkSize = 4 * 1024 * 1024
-  var buf = newSeqUninit[byte](ChunkSize)
-  var remaining = length
-  while remaining > 0:
-    let toRead = min(remaining, ChunkSize.int64).int
-    let nRead = readBytes(src, buf, 0, toRead)
-    if nRead == 0: break
-    discard dst.writeBytes(buf, 0, nRead)
-    remaining -= nRead.int64
-
 # ---------------------------------------------------------------------------
 # sendfile(2) — zero-copy fd-to-fd transfer
 # ---------------------------------------------------------------------------
@@ -223,14 +207,19 @@ when defined(linux):
   proc c_sendfile*(outFd, inFd: cint; offset: ptr Off; count: csize_t): int
     {.importc: "sendfile", header: "<sys/sendfile.h>".}
 
-proc sendfileAll*(outFd, inFd: cint; count: Off) =
+proc sendfileAll*(outFd, inFd: cint; count: Off; startOffset: Off = 0) =
   ## Copy count bytes from inFd to outFd using sendfile (Linux) or read/write.
+  ## When startOffset > 0, sendfile reads from that file offset (ignoring the
+  ## fd's current position); the non-Linux fallback uses lseek instead.
   when defined(linux):
-    var offset: Off = 0
-    while offset < count:
-      let sent = c_sendfile(outFd, inFd, addr offset, csize_t(count - offset))
+    var offset: Off = startOffset
+    while offset < startOffset + count:
+      let remaining = startOffset + count - offset
+      let sent = c_sendfile(outFd, inFd, addr offset, csize_t(remaining))
       if sent <= 0: break
   else:
+    if startOffset > 0:
+      discard posix.lseek(inFd, startOffset, SEEK_SET)
     const BufSize = 65536
     var buf = newSeqUninit[byte](BufSize)
     var remaining = count
@@ -253,18 +242,7 @@ proc rawCopyBytesFd*(srcPath: string; dstFd: cint; start: int64; length: int64) 
   if srcFd < 0:
     quit("rawCopyBytesFd: could not open " & srcPath, 1)
   defer: discard posix.close(srcFd)
-  when defined(linux):
-    # sendfile with non-NULL offset reads from the specified offset, not the
-    # fd's current position.  Pass start directly instead of using lseek.
-    var offset: Off = start.Off
-    var remaining = length.Off
-    while remaining > 0:
-      let sent = c_sendfile(dstFd, srcFd, addr offset, csize_t(remaining))
-      if sent <= 0: break
-      remaining -= sent.Off
-  else:
-    discard posix.lseek(srcFd, start.Off, SEEK_SET)
-    sendfileAll(dstFd, srcFd, length.Off)
+  sendfileAll(dstFd, srcFd, length.Off, start.Off)
 
 proc decompressBgzf*(data: openArray[byte]): seq[byte] =
   ## Decompress the first BGZF block in data; return the uncompressed bytes.
@@ -654,13 +632,6 @@ proc extractBcfHeaderAndFirstOffset*(path: string): (seq[byte], int64, int) =
     quit(&"extractBcfHeaderAndFirstOffset: {path}: file too short to read BCF header", 1)
   quit(&"extractBcfHeaderAndFirstOffset: {path}: first record not found in file", 1)
 
-proc extractBcfHeader*(path: string): seq[byte] =
-  ## Extract the BCF header blob (5-byte magic + 4-byte l_text + l_text bytes)
-  ## from path, recompressed as BGZF.  Thin wrapper over
-  ## `extractBcfHeaderAndFirstOffset` that discards the virtual-offset fields.
-  let (hdr, _, _) = extractBcfHeaderAndFirstOffset(path)
-  compressToBgzfMulti(hdr)
-
 proc blockHasData(content: openArray[byte]; prevEndedWithNewline: bool): bool =
   ## Return true if content contains at least one complete line not starting
   ## with '#'.  prevEndedWithNewline must be true if the previous BGZF block
@@ -741,36 +712,6 @@ proc getHeaderAndFirstBlock*(vcfPath: string): (seq[byte], int64) =
   # Edge case: file has no data records (header only).
   let compressedHeader = compressToBgzfMulti(headerBytes)
   result = (compressedHeader, pos)
-
-# ---------------------------------------------------------------------------
-# Block-length utilities
-# ---------------------------------------------------------------------------
-
-proc getLengths*(starts: seq[int64]; fileSize: int64): seq[int64] =
-  ## Compute the byte length of each BGZF block: starts[i+1] - starts[i],
-  ## with the last block running to fileSize.
-  result = newSeq[int64](starts.len)
-  for i in 0 ..< starts.len - 1:
-    result[i] = starts[i + 1] - starts[i]
-  if starts.len > 0:
-    result[^1] = fileSize - starts[^1]
-
-# ---------------------------------------------------------------------------
-# BCF record walking
-# ---------------------------------------------------------------------------
-
-proc findBcfRecordEnd*(data: openArray[byte]): int =
-  ## Walk BCF records from the start of data.  Return the index just past the
-  ## last complete record, or 0 if not even one complete record fits.
-  var pos = 0
-  while pos + 8 <= data.len:
-    let lShared = cast[ptr uint32](unsafeAddr data[pos])[]
-    let lIndiv  = cast[ptr uint32](unsafeAddr data[pos + 4])[]
-    let recLen  = 8 + lShared.int + lIndiv.int
-    if pos + recLen > data.len:
-      break  # incomplete record
-    pos += recLen
-  return pos
 
 # ---------------------------------------------------------------------------
 # Format sniffing

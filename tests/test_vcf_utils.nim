@@ -71,29 +71,6 @@ timed("V1.2", "scanBgzfBlockStarts range: truncates at upper bound"):
     &"range scan: expected [{allStarts[0]}], got {first}"
 
 # ---------------------------------------------------------------------------
-# V1.3 — rawCopyBytes: copied bytes match source slice exactly
-# ---------------------------------------------------------------------------
-
-timed("V1.3", "rawCopyBytes: copied bytes match source"):
-  let starts = scanBgzfBlockStarts(SmallVcf)
-  let hdr = readFileSlice(SmallVcf, starts[0], 18)
-  let blkSize = bgzfBlockSize(hdr)
-  doAssert blkSize > 0
-
-  let expected = readFileSlice(SmallVcf, starts[0], blkSize)
-  let tmpPath = getTempDir() / "blocky_test_rawcopy.bin"
-  let dst = open(tmpPath, fmWrite)
-  rawCopyBytes(SmallVcf, dst, starts[0], blkSize.int64)
-  dst.close()
-  let got = readFile(tmpPath)
-  removeFile(tmpPath)
-  doAssert got.len == blkSize,
-    &"rawCopyBytes: expected {blkSize} bytes, got {got.len}"
-  for i in 0 ..< blkSize:
-    doAssert got[i].byte == expected[i],
-      &"rawCopyBytes: mismatch at byte {i}"
-
-# ---------------------------------------------------------------------------
 # V1.4 — compressToBgzf/decompressBgzf round-trip
 # ---------------------------------------------------------------------------
 

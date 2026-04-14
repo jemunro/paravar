@@ -4,8 +4,8 @@
 ##   - sequential scatter (`computeShards`, `doWriteShard`, `scatter`)
 ##
 ## Format knowledge — BGZF I/O, TBI/CSI index parsing, header extraction
-## (`extractBcfHeader`, `getHeaderAndFirstBlock`), block-length maths and
-## BCF record walking — lives in `bgzf`.
+## (`extractBcfHeaderAndFirstOffset`, `getHeaderAndFirstBlock`), and
+## block splitting — lives in `bgzf`.
 
 import std/[algorithm, cpuinfo, os, posix, sequtils, strformat, strutils]
 {.warning[Deprecated]: off.}

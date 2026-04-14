@@ -95,15 +95,6 @@ timed("SC2.1", "getHeaderAndFirstBlock: header valid, firstBlock has BGZF magic"
   doAssert magic[0] == 0x1f and magic[1] == 0x8b,
     &"getHeaderAndFirstBlock: firstBlock {firstBlock} has bad BGZF magic"
 
-# ---------------------------------------------------------------------------
-# SC6 — testGetLengths: converts block starts to cumulative lengths correctly
-# ---------------------------------------------------------------------------
-timed("SC2.2", "getLengths: cumulative lengths correct"):
-  let starts: seq[int64] = @[0'i64, 100, 300, 700]
-  let lengths = getLengths(starts, 1000)
-  doAssert lengths == @[100'i64, 200, 400, 300],
-    &"getLengths: expected [100,200,400,300] got {lengths}"
-
 # SC3.1-SC3.4 (partitionBoundaries, isValidBoundary, optimiseBoundaries) removed:
 # these procs no longer exist after Milestone V — scatter now uses index virtual
 # offsets directly, eliminating boundary search. End-to-end scatter correctness
@@ -238,7 +229,8 @@ proc leU32At(data: seq[byte]; pos: int): uint32 =
 # SC16 — testExtractBcfHeaderSmall: BGZF magic, BCF magic, l_text > 0, total decompressed == 5+4+l_text
 # ---------------------------------------------------------------------------
 timed("SC6.1", "extractBcfHeader: small.bcf"):
-  let hdrBytes = extractBcfHeader(SmallBcf)
+  let (rawHdr, _, _) = extractBcfHeaderAndFirstOffset(SmallBcf)
+  let hdrBytes = compressToBgzfMulti(rawHdr)
   # Must be a valid BGZF block sequence
   doAssert bgzfBlockSize(hdrBytes) > 0,
     "extractBcfHeader: result does not start with a valid BGZF block"
@@ -272,7 +264,8 @@ timed("SC6.1", "extractBcfHeader: small.bcf"):
 timed("SC6.2", "extractBcfHeader: chr22_1kg.bcf large header"):
   # chr22_1kg.bcf has 2504 samples — verify extractBcfHeader handles it correctly.
   doAssert fileExists(KgBcf), &"large BCF fixture missing: {KgBcf}"
-  let hdrBytes = extractBcfHeader(KgBcf)
+  let (rawHdr2, _, _) = extractBcfHeaderAndFirstOffset(KgBcf)
+  let hdrBytes = compressToBgzfMulti(rawHdr2)
   doAssert bgzfBlockSize(hdrBytes) > 0,
     "extractBcfHeader large: result does not start with a valid BGZF block"
   let firstBlkSize = bgzfBlockSize(hdrBytes)
