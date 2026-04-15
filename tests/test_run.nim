@@ -138,12 +138,6 @@ proc countRecords(path: string): int =
   let (o, _) = execCmdEx("bcftools query -f '%POS\\n' " & path & " 2>/dev/null | wc -l")
   o.strip.parseInt
 
-proc countTextLines(path: string): int =
-  ## Count non-header (non-#) lines in a plain text file.
-  for line in lines(path):
-    if line.len > 0 and line[0] != '#':
-      inc result
-
 proc recordsHash(paths: seq[string]): string =
   ## Concatenate records from paths in order (bcftools view -H, full genotypes),
   ## write to temp file, return sha256sum hex digest.

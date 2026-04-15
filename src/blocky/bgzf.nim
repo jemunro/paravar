@@ -43,13 +43,13 @@ const BGZF_EOF* = [
   0x00, 0x00, 0x00, 0x00
 ]
 
-const BCF_MAGIC* = [byte('B'), byte('C'), byte('F'), 0x02'u8, 0x02'u8]
+const BCF_MAGIC = [byte('B'), byte('C'), byte('F'), 0x02'u8, 0x02'u8]
 
 ## BGZF magic: gzip header with FEXTRA flag (1f 8b 08 04).
-const BGZF_MAGIC* = [0x1f'u8, 0x8b'u8, 0x08'u8, 0x04'u8]
+const BGZF_MAGIC = [0x1f'u8, 0x8b'u8, 0x08'u8, 0x04'u8]
 
 ## Byte overhead per BGZF block: 18-byte header + 4-byte CRC32 + 4-byte ISIZE.
-const BGZF_OVERHEAD* = 26
+const BGZF_OVERHEAD = 26
 ## Maximum uncompressed bytes per BGZF block.
 const BGZF_MAX_BLOCK_SIZE* = 65536
 
@@ -298,26 +298,6 @@ proc copyRangeFromFile*(srcPath: string; dstFd: cint; start: int64; length: int6
   defer: discard posix.close(srcFd)
   copyRange(dstFd, srcFd, length.Off, start.Off)
 
-proc decompressBgzf*(data: openArray[byte]): seq[byte] =
-  ## Decompress the first BGZF block in data; return the uncompressed bytes.
-  ## Calls quit(1) on malformed input.  Reuses a thread-local decompressor.
-  let blkSize = bgzfBlockSize(data)
-  if blkSize < 0:
-    quit("decompressBgzf: not a valid BGZF block header", 1)
-  let isize = leU32(data, blkSize - 4).int
-  if isize == 0:
-    return @[]
-  result = newSeqUninit[byte](isize)
-  let dcmp = getDecompressor()
-  let compLen = blkSize - BGZF_OVERHEAD
-  let ret = libdeflateDeflateDecompress(
-    dcmp,
-    unsafeAddr data[18], compLen.csize_t,
-    addr result[0],      isize.csize_t,
-    nil)
-  if ret != LIBDEFLATE_SUCCESS:
-    quit(&"decompressBgzf: deflate_decompress returned {ret}", 1)
-
 proc decompressBgzfInto*(data: openArray[byte]; buf: var seq[byte]) =
   ## Decompress the first BGZF block into buf, resizing as needed.
   ## Reuses buf's allocation across calls — zero alloc in steady state.
@@ -329,8 +309,8 @@ proc decompressBgzfInto*(data: openArray[byte]; buf: var seq[byte]) =
   if isize == 0:
     buf.setLen(0)
     return
-  if buf.len < isize:
-    buf = newSeqUninit[byte](isize)
+  if buf.len < BGZF_MAX_BLOCK_SIZE:
+    buf = newSeqUninit[byte](BGZF_MAX_BLOCK_SIZE)
   let dcmp = getDecompressor()
   let compLen = blkSize - BGZF_OVERHEAD
   let ret = libdeflateDeflateDecompress(
@@ -341,6 +321,11 @@ proc decompressBgzfInto*(data: openArray[byte]; buf: var seq[byte]) =
   if ret != LIBDEFLATE_SUCCESS:
     quit(&"decompressBgzfInto: deflate_decompress returned {ret}", 1)
   buf.setLen(isize)
+
+proc decompressBgzf*(data: openArray[byte]): seq[byte] =
+  ## Decompress the first BGZF block in data; return a new seq.
+  ## Thin wrapper around decompressBgzfInto.
+  decompressBgzfInto(data, result)
 
 # ---------------------------------------------------------------------------
 # Thread-local BGZF compression buffer — shared by all compress functions.

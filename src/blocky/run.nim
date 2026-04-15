@@ -4,7 +4,7 @@
 ##   1. Parsing the "---"-separated argv into blocky args + pipeline stages.
 ##   2. Building the sh -c command string for each shard.
 ##   3. Mode inference from -o / {} flags.
-##   4. Executing per-shard pipelines concurrently (all N shards run at once).
+##   4. Executing per-shard pipelines via a bounded worker pool.
 
 import std/[atomics, cpuinfo, os, posix, sequtils, strformat, strutils, tempfiles]
 {.warning[Deprecated]: off.}
