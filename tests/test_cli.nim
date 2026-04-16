@@ -16,7 +16,8 @@ const SmallBcf = DataDir / "small.bcf"          # CSI indexed BCF
 
 proc run(args: string): (string, int) =
   ## Run blocky with shell args; combine stdout+stderr; return (outp, code).
-  execCmdEx(BinPath & " " & args & " 2>&1")
+  let t = getEnv("BLOCKY_TEST_TIMEOUT", "10")
+  execCmdEx("timeout " & t & " " & BinPath & " " & args & " 2>&1")
 
 proc recordsHash(paths: seq[string]): string =
   ## Concatenate records from paths in order (bcftools view -H, full genotypes),

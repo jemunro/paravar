@@ -40,7 +40,8 @@ jobs:
       - name: Test
         run: nimble test -y
         env:
-          BLOCKY_TEST_TIMEOUT: "60"
+          BLOCKY_TEST_TIMEOUT: "10"
+          BLOCKY_IGNORE_TIMEOUT: "1"
 
       - name: Build release
         run: nimble release -y

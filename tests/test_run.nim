@@ -214,7 +214,8 @@ timed("R4.0", "binary available (run CLI tests)"):
   doAssert fileExists(BinPath), "binary not found: " & BinPath & " (run nimble build)"
 
 proc runBin(args: string): (string, int) =
-  execCmdEx(BinPath & " run " & args & " 2>&1")
+  let t = getEnv("BLOCKY_TEST_TIMEOUT", "10")
+  execCmdEx("timeout " & t & " " & BinPath & " run " & args & " 2>&1")
 
 # ---------------------------------------------------------------------------
 # R4.1 — testCliRunMissingSep: no --- exits 1 with '---' in error message

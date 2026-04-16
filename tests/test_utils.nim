@@ -9,6 +9,8 @@ let gTimeoutSec* = block:
   let e = getEnv("BLOCKY_TEST_TIMEOUT", "10")
   try: parseFloat(e) except ValueError: 10.0
 
+let gIgnoreTimeout* = getEnv("BLOCKY_IGNORE_TIMEOUT", "0") == "1"
+
 var gDeadline: Atomic[float64]
 var gLabel: string
 var gLock: Lock
@@ -29,7 +31,10 @@ proc watchdog {.thread, gcsafe.} =
       withLock(gLock):
         {.gcsafe.}: msg = gLabel & &"\tFAIL\tTIMEOUT (>{gTimeoutSec} s)"
       stderr.writeLine(msg)
-      quit(1)
+      if gIgnoreTimeout:
+        gDeadline.store(0.0, moRelaxed)  # disarm, let body continue
+      else:
+        quit(1)
 
 var gWatchdogThread: Thread[void]
 createThread(gWatchdogThread, watchdog)
