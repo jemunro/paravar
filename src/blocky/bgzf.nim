@@ -57,8 +57,8 @@ const BGZF_MAX_BLOCK_SIZE* = 65536
 # libdeflate C FFI — deflate + inflate + crc32
 # ---------------------------------------------------------------------------
 
-{.passC: "-I vendor/libdeflate-1.25".}
-{.passL: "vendor/libdeflate-1.25/build/libdeflate.a".}
+{.passC: "-I vendor/libdeflate".}
+{.passL: "vendor/libdeflate/build/libdeflate.a".}
 
 const LIBDEFLATE_SUCCESS = 0'i32
 

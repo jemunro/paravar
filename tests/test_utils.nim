@@ -1,6 +1,6 @@
 ## test_utils.nim — shared test helpers: timed template + watchdog thread
 
-import std/[times, atomics, os, locks, strformat, strutils]
+import std/[times, atomics, os, locks, strformat, strutils, posix]
 
 when defined(nimPanics):
   {.warning: "tests compiled with --panics:on; AssertionDefect is uncatchable and FAIL line won't print. Set `switch(\"panics\", \"off\")` in config.nims.".}
@@ -31,13 +31,13 @@ proc watchdog {.thread, gcsafe.} =
       withLock(gLock):
         {.gcsafe.}: msg = gLabel & &"\tFAIL\tTIMEOUT (>{gTimeoutSec} s)"
       stderr.writeLine(msg)
-      if gIgnoreTimeout:
-        gDeadline.store(0.0, moRelaxed)  # disarm, let body continue
-      else:
-        quit(1)
+      quit(1)
 
-var gWatchdogThread: Thread[void]
-createThread(gWatchdogThread, watchdog)
+# Only start watchdog when not using fork-based timeout isolation
+when true:
+  if not gIgnoreTimeout:
+    var gWatchdogThread: Thread[void]
+    createThread(gWatchdogThread, watchdog)
 
 # Hook invoked on any unhandled exception (including AssertionDefect when
 # --panics:off). Runs before Nim's default stack-trace-and-quit behavior.
@@ -53,13 +53,47 @@ system.onUnhandledException = proc(errorMsg: string) {.nimcall, gcsafe, raises: 
 
 template timed*(id, desc: string, body: untyped) =
   block:
-    withLock(gLock):
-      gLabel = id & " - " & desc
     gCurrentId = id
     gCurrentDesc = desc
     gCurrentT0 = epochTime()
-    gDeadline.store(epochTime() + gTimeoutSec, moRelaxed)
-    body
-    gDeadline.store(0.0, moRelaxed)
-    let el = epochTime() - gCurrentT0
-    echo id & "\tPASS\t" & formatFloat(el, ffDecimal, 2) & " s\t" & desc
+
+    if gIgnoreTimeout:
+      # Fork-based isolation: child runs the body, parent waits with timeout.
+      # If the child hangs, the parent kills it and continues to the next test.
+      let pid = fork()
+      if pid == 0:
+        # Child — run body and exit
+        body
+        quit(0)
+      elif pid > 0:
+        # Parent — poll child with timeout
+        var status: cint
+        let dl = epochTime() + gTimeoutSec
+        var finished = false
+        while epochTime() < dl:
+          if waitpid(pid, status, WNOHANG) > 0:
+            finished = true
+            break
+          sleep(50)
+        if not finished:
+          discard kill(pid, cint(SIGKILL))
+          discard waitpid(pid, status, 0)
+          stderr.writeLine(id & " - " & desc & &"\tFAIL\tTIMEOUT (>{gTimeoutSec} s)")
+        elif WIFEXITED(status) and WEXITSTATUS(status) == 0:
+          let el = epochTime() - gCurrentT0
+          echo id & "\tPASS\t" & formatFloat(el, ffDecimal, 2) & " s\t" & desc
+        else:
+          let el = epochTime() - gCurrentT0
+          stderr.writeLine(id & "\tFAIL\t" &
+                            formatFloat(el, ffDecimal, 2) & " s\t" & desc)
+      else:
+        stderr.writeLine(id & "\tFAIL\tfork() failed")
+    else:
+      # Direct execution with watchdog thread timeout
+      withLock(gLock):
+        gLabel = id & " - " & desc
+      gDeadline.store(epochTime() + gTimeoutSec, moRelaxed)
+      body
+      gDeadline.store(0.0, moRelaxed)
+      let el = epochTime() - gCurrentT0
+      echo id & "\tPASS\t" & formatFloat(el, ffDecimal, 2) & " s\t" & desc

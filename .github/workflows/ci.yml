@@ -21,6 +21,8 @@ jobs:
       image: condaforge/mambaforge:latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Trust workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -28,11 +30,17 @@ jobs:
       - name: Install dependencies
         run: mamba install -y -c bioconda -c conda-forge bcftools tabix cmake make c-compiler 'nim>=2.2.6'
 
-      - name: Cache vendor
+      - name: Cache libdeflate build
         uses: actions/cache@v4
         with:
-          path: vendor/
-          key: libdeflate-1.25
+          path: vendor/libdeflate/build/
+          key: libdeflate-build-${{ hashFiles('.gitmodules', 'vendor/libdeflate/**') }}
+
+      - name: Cache test fixtures
+        uses: actions/cache@v4
+        with:
+          path: tests/data/
+          key: test-fixtures-${{ hashFiles('tests/generate_fixtures.sh') }}
 
       - name: Generate test fixtures
         run: bash tests/generate_fixtures.sh

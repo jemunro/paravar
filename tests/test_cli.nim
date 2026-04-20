@@ -36,7 +36,7 @@ proc recordsHash(paths: seq[string]): string =
 # Build binary (setup)
 # ---------------------------------------------------------------------------
 
-timed("CL0", "binary available"):
+timed("C01", "binary available"):
   if not fileExists(BinPath):
     let (outp, code) = execCmdEx("nimble build 2>&1")
     if code != 0:
@@ -45,42 +45,42 @@ timed("CL0", "binary available"):
   doAssert fileExists(BinPath), "binary not found: " & BinPath & " (run nimble build)"
 
 # ===========================================================================
-# CL1–CL7 — Error cases (missing flags, invalid args, unsupported modes)
+# C02–C08 — Error cases (missing flags, invalid args, unsupported modes)
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# CL1 — testMissingN: missing -n exits non-zero with 'n' in error message
+# C02 — testMissingN: missing -n exits non-zero with 'n' in error message
 # ---------------------------------------------------------------------------
 
-timed("CL1", "missing -n exits non-zero"):
+timed("C02", "missing -n exits non-zero"):
   let (outp, code) = run(&"scatter -o /tmp/blocky_cli_test {SmallVcf}")
   doAssert code != 0, "missing -n should exit non-zero"
   doAssert "n" in outp.toLowerAscii,
     &"missing -n error should mention 'n', got: {outp}"
 
 # ---------------------------------------------------------------------------
-# CL2 — testInvalidN0: -n 0 exits non-zero
+# C03 — testInvalidN0: -n 0 exits non-zero
 # ---------------------------------------------------------------------------
 
-timed("CL2", "-n 0 exits non-zero"):
+timed("C03", "-n 0 exits non-zero"):
   let (_, code) = run(&"scatter -n 0 -o /tmp/blocky_cli_test {SmallVcf}")
   doAssert code != 0, "-n 0 should exit non-zero"
 
 # ---------------------------------------------------------------------------
-# CL3 — testMissingO: missing -o exits non-zero with 'o' in error message
+# C04 — testMissingO: missing -o exits non-zero with 'o' in error message
 # ---------------------------------------------------------------------------
 
-timed("CL3", "missing -o exits non-zero"):
+timed("C04", "missing -o exits non-zero"):
   let (outp, code) = run(&"scatter -n 2 {SmallVcf}")
   doAssert code != 0, "missing -o should exit non-zero"
   doAssert "o" in outp.toLowerAscii,
     &"missing -o error should mention 'o', got: {outp}"
 
 # ---------------------------------------------------------------------------
-# CL4 — testUnknownExtension: unknown extension (.xyz) exits 1 with extension in message
+# C05 — testUnknownExtension: unknown extension (.xyz) exits 1 with extension in message
 # ---------------------------------------------------------------------------
 
-timed("CL4", "unknown extension exits 1 with extension in message"):
+timed("C05", "unknown extension exits 1 with extension in message"):
   let tmpDir = createTempDir("blocky_", "")
   let tmpFile = tmpDir / "input.xyz"
   writeFile(tmpFile, "dummy")
@@ -90,10 +90,10 @@ timed("CL4", "unknown extension exits 1 with extension in message"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL5 — testBcfNoIndex: BCF without index exits 1 (no auto-scan fallback)
+# C06 — testBcfNoIndex: BCF without index exits 1 (no auto-scan fallback)
 # ---------------------------------------------------------------------------
 
-timed("CL5", "BCF no index exits 1"):
+timed("C06", "BCF no index exits 1"):
   doAssert fileExists(SmallBcf), "BCF fixture missing — run generate_fixtures.sh"
   let tmpDir = createTempDir("blocky_", "")
   let tmpBcf = tmpDir / "noindex.bcf"
@@ -104,10 +104,10 @@ timed("CL5", "BCF no index exits 1"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL6 — testBcfRunScan: --scan with BCF via run exits 1
+# C07 — testBcfRunScan: --scan with BCF via run exits 1
 # ---------------------------------------------------------------------------
 
-timed("CL6", "BCF run --scan exits 1"):
+timed("C07", "BCF run --scan exits 1"):
   doAssert fileExists(SmallBcf), "BCF fixture missing — run generate_fixtures.sh"
   let tmpDir = createTempDir("blocky_", "")
   let (outp, code) = run(&"run -n 2 -o {tmpDir}/out.vcf.gz --scan {SmallBcf} --- cat")
@@ -117,10 +117,10 @@ timed("CL6", "BCF run --scan exits 1"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL7 — testBcfScan: --scan with BCF via scatter exits 1
+# C08 — testBcfScan: --scan with BCF via scatter exits 1
 # ---------------------------------------------------------------------------
 
-timed("CL7", "BCF --scan exits 1"):
+timed("C08", "BCF --scan exits 1"):
   doAssert fileExists(SmallBcf), "BCF fixture missing — run generate_fixtures.sh"
   let tmpDir = createTempDir("blocky_", "")
   let (outp, code) = run(&"scatter -n 2 -o {tmpDir}/shard --scan {SmallBcf}")
@@ -130,14 +130,14 @@ timed("CL7", "BCF --scan exits 1"):
   removeDir(tmpDir)
 
 # ===========================================================================
-# CL8–CL13 — Integration: scatter correctness for VCF and BCF
+# C09–C14 — Integration: scatter correctness for VCF and BCF
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# CL8 — testMissingIndex: no index file → auto-scan fallback with warning; shards produced
+# C09 — testMissingIndex: no index file → auto-scan fallback with warning; shards produced
 # ---------------------------------------------------------------------------
 
-timed("CL8", "no-index scatter: auto-scan with warning, shards produced"):
+timed("C09", "no-index scatter: auto-scan with warning, shards produced"):
   # With no index, scatter should warn and fall back to BGZF scan automatically.
   let tmpDir = createTempDir("blocky_", "")
   let tmpVcf = tmpDir / "noindex.vcf.gz"
@@ -152,10 +152,10 @@ timed("CL8", "no-index scatter: auto-scan with warning, shards produced"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL9 — testScanFlag: --scan ignores existing index; shards valid, record count matches
+# C10 — testScanFlag: --scan ignores existing index; shards valid, record count matches
 # ---------------------------------------------------------------------------
 
-timed("CL9", "--scan: 4 shards, records match"):
+timed("C10", "--scan: 4 shards, records match"):
   let tmpDir = createTempDir("blocky_", "")
   let outp_template = tmpDir / "out.vcf.gz"
   let (runOutp, runCode) = run(&"scatter -n 4 -o {outp_template} --scan {SmallVcf}")
@@ -174,10 +174,10 @@ timed("CL9", "--scan: 4 shards, records match"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL10 — testEndToEnd: scatter -n 4 VCF; all shards valid, content hash matches
+# C11 — testEndToEnd: scatter -n 4 VCF; all shards valid, content hash matches
 # ---------------------------------------------------------------------------
 
-timed("CL10", "e2e: record content hash matches original"):
+timed("C11", "e2e: record content hash matches original"):
   let tmpDir = createTempDir("blocky_", "")
   let outp_template = tmpDir / "out.vcf.gz"
 
@@ -202,10 +202,10 @@ timed("CL10", "e2e: record content hash matches original"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL11 — testCsiIndex: CSI-indexed VCF scatter; shards valid, record count matches
+# C12 — testCsiIndex: CSI-indexed VCF scatter; shards valid, record count matches
 # ---------------------------------------------------------------------------
 
-timed("CL11", "CSI: scatter -n 4, all shards valid"):
+timed("C12", "CSI: scatter -n 4, all shards valid"):
   doAssert fileExists(CsiVcf), "CSI fixture missing — run generate_fixtures.sh"
   let tmpDir = createTempDir("blocky_", "")
   let outp_template = tmpDir / "out.vcf.gz"
@@ -231,10 +231,10 @@ timed("CL11", "CSI: scatter -n 4, all shards valid"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL12 — testBcfExtension: BCF scatter produces .bcf shards with matching content hash
+# C13 — testBcfExtension: BCF scatter produces .bcf shards with matching content hash
 # ---------------------------------------------------------------------------
 
-timed("CL12", "BCF .bcf extension -> BCF mode, content hash matches"):
+timed("C13", "BCF .bcf extension -> BCF mode, content hash matches"):
   doAssert fileExists(SmallBcf), "BCF fixture missing — run generate_fixtures.sh"
   let tmpDir = createTempDir("blocky_", "")
   let outp_template = tmpDir / "out.bcf"
@@ -252,14 +252,14 @@ timed("CL12", "BCF .bcf extension -> BCF mode, content hash matches"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL13 — testKg1000Genomes: large 1KG VCF scatter -n 10 (skipped if fixture absent)
+# C14 — testKg1000Genomes: large 1KG VCF scatter -n 10 (skipped if fixture absent)
 # ---------------------------------------------------------------------------
 
 block testKg1000Genomes:
   if not fileExists(KgVcf):
-    echo "SKIP CL13 1KG chr22: file not present (run tests/generate_fixtures.sh)"
+    echo "SKIP C14 1KG chr22: file not present (run tests/generate_fixtures.sh)"
   else:
-    timed("CL13", "1KG chr22 scatter: records match original"):
+    timed("C14", "1KG chr22 scatter: records match original"):
       let tmpDir = createTempDir("blocky_", "")
       let outp_template = tmpDir / "out.vcf.gz"
 
@@ -288,52 +288,51 @@ block testKg1000Genomes:
       removeDir(tmpDir)
 
 # ===========================================================================
-# CL30 — -u flag (force uncompressed output)
+# C15 — -u flag (force uncompressed output)
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# CL30.2 — run -u with --discard: exits non-zero (mutually exclusive)
+# C15 — run -u with --discard: exits non-zero (mutually exclusive)
 # ---------------------------------------------------------------------------
 
-timed("CL30.2", "run -u with --discard: exits non-zero"):
+timed("C15", "run -u with --discard: exits non-zero"):
   let (outp, code) = run(
     &"run -n 2 -u --discard {SmallVcf} ::: cat")
-  doAssert code != 0, &"CL30.2: -u with --discard should exit non-zero, got {code}"
+  doAssert code != 0, &"C15: -u with --discard should exit non-zero, got {code}"
   doAssert "discard" in outp.toLowerAscii,
-    &"CL30.2: expected --discard error, got:\n{outp}"
+    &"C15: expected --discard error, got:\n{outp}"
 
 # ===========================================================================
-# CL31 — -n exceeds index entry count
+# C025 — -n exceeds index entry count
 # ===========================================================================
 # Scatter and run paths must reject nShards > available index entries with a
 # clear error message rather than producing empty shards. Tests cover:
-#   CL31.1 — scatter VCF: error suggests --scan
-#   CL31.2 — scatter BCF: error does NOT suggest --scan (BCF can't scan)
-#   CL31.3 — scatter VCF --scan: succeeds when raw blocks > requested n
-#   CL31.4 — run +merge+ VCF: same error path as scatter
-#   CL31.5 — -n at the exact limit succeeds (boundary check)
+#   C16 — scatter VCF: error suggests --scan
+#   C17 — scatter BCF: error does NOT suggest --scan (BCF can't scan)
+#   C18 — scatter VCF --scan: succeeds when raw blocks > requested n
+#   C19 — -n at the exact limit succeeds (boundary check)
 
 # ---------------------------------------------------------------------------
-# CL31.1 — scatter -n way too high on VCF: errors, suggests --scan
+# C16 — scatter -n way too high on VCF: errors, suggests --scan
 # ---------------------------------------------------------------------------
 
-timed("CL31.1", "scatter -n too high VCF: errors with --scan suggestion"):
+timed("C16", "scatter -n too high VCF: errors with --scan suggestion"):
   let tmpDir = createTempDir("blocky_", "")
   # chr22_1kg.vcf.gz has only 57 index entries; -n 100 must error.
   let (outp, code) = run(&"scatter -n 100 -o {tmpDir}/shard_{{}}.vcf.gz {KgVcf}")
   doAssert code != 0,
-    &"CL31.1: -n 100 on chr22_1kg.vcf.gz (57 voffs) should error, got {code}:\n{outp}"
+    &"C16: -n 100 on chr22_1kg.vcf.gz (57 voffs) should error, got {code}:\n{outp}"
   doAssert "index entries" in outp,
-    &"CL31.1: error should mention 'index entries', got: {outp}"
+    &"C16: error should mention 'index entries', got: {outp}"
   doAssert "--scan" in outp,
-    &"CL31.1: VCF error should suggest --scan, got: {outp}"
+    &"C16: VCF error should suggest --scan, got: {outp}"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL31.2 — scatter -n way too high on BCF: errors, NO --scan suggestion
+# C17 — scatter -n way too high on BCF: errors, NO --scan suggestion
 # ---------------------------------------------------------------------------
 
-timed("CL31.2", "scatter -n too high BCF: errors without --scan suggestion"):
+timed("C17", "scatter -n too high BCF: errors without --scan suggestion"):
   doAssert fileExists(DataDir / "chr22_1kg.bcf"),
     "chr22_1kg.bcf fixture missing — run generate_fixtures.sh"
   let tmpDir = createTempDir("blocky_", "")
@@ -341,28 +340,28 @@ timed("CL31.2", "scatter -n too high BCF: errors without --scan suggestion"):
   let (outp, code) = run(
     &"scatter -n 100 -o {tmpDir}/shard_{{}}.bcf {DataDir}/chr22_1kg.bcf")
   doAssert code != 0,
-    &"CL31.2: -n 100 on chr22_1kg.bcf (58 voffs) should error, got {code}:\n{outp}"
+    &"C17: -n 100 on chr22_1kg.bcf (58 voffs) should error, got {code}:\n{outp}"
   doAssert "index entries" in outp,
-    &"CL31.2: error should mention 'index entries', got: {outp}"
+    &"C17: error should mention 'index entries', got: {outp}"
   doAssert "--scan" notin outp,
-    &"CL31.2: BCF error should NOT suggest --scan, got: {outp}"
+    &"C17: BCF error should NOT suggest --scan, got: {outp}"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL31.3 — scatter --scan VCF: succeeds when raw blocks exceed -n
+# C18 — scatter --scan VCF: succeeds when raw blocks exceed -n
 # ---------------------------------------------------------------------------
 
-timed("CL31.3", "scatter --scan recovers: 30 shards, records match"):
+timed("C18", "scatter --scan recovers: 30 shards, records match"):
   let tmpDir = createTempDir("blocky_", "")
   # chr22_1kg.vcf.gz has 28 unique block offsets; -n 30 exceeds index entries
   # but --scan uses raw BGZF blocks (~834 blocks) so -n 30 succeeds.
   let (outp, code) = run(
     &"scatter -n 30 --scan -o {tmpDir}/shard_{{}}.vcf.gz {KgVcf}")
   doAssert code == 0,
-    &"CL31.3: --scan with -n 30 should succeed, got {code}:\n{outp}"
+    &"C18: --scan with -n 30 should succeed, got {code}:\n{outp}"
   let shards = toSeq(walkFiles(tmpDir / "shard_*.vcf.gz"))
   doAssert shards.len == 30,
-    &"CL31.3: expected 30 shards, got {shards.len}"
+    &"C18: expected 30 shards, got {shards.len}"
   # Verify record count: concat all shards naively, count once (fast).
   let origCnt = execCmdEx(
     "bcftools query -f '%POS\\n' " & KgVcf & " 2>/dev/null | wc -l")[0].strip.parseInt
@@ -370,47 +369,47 @@ timed("CL31.3", "scatter --scan recovers: 30 shards, records match"):
     "bcftools concat --naive " & shards.join(" ") &
     " 2>/dev/null | bcftools query -f '%POS\\n' 2>/dev/null | wc -l")[0].strip.parseInt
   doAssert outCnt == origCnt,
-    &"CL31.3: record count mismatch: orig={origCnt} shards={outCnt}"
+    &"C18: record count mismatch: orig={origCnt} shards={outCnt}"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL31.5 — -n at the exact voff count succeeds
+# C19 — -n at the exact voff count succeeds
 # ---------------------------------------------------------------------------
 
-timed("CL31.5", "scatter -n at exact voff limit: 28 shards"):
+timed("C19", "scatter -n at exact voff limit: 28 shards"):
   let tmpDir = createTempDir("blocky_", "")
   # chr22_1kg.vcf.gz has 28 voffs; -n 28 must succeed.
   let (outp, code) = run(&"scatter -n 28 -o {tmpDir}/shard_{{}}.vcf.gz {KgVcf}")
   doAssert code == 0,
-    &"CL31.5: -n 28 (== voff count) should succeed, got {code}:\n{outp}"
+    &"C19: -n 28 (== voff count) should succeed, got {code}:\n{outp}"
   let shards = toSeq(walkFiles(tmpDir / "shard_*.vcf.gz"))
   doAssert shards.len == 28,
-    &"CL31.5: expected 28 shards, got {shards.len}"
+    &"C19: expected 28 shards, got {shards.len}"
   removeDir(tmpDir)
 
 # ===========================================================================
-# CL32 — --clamp reduces -n instead of erroring
+# C20 — --clamp reduces -n instead of erroring
 # ===========================================================================
 # When --clamp is set and -n exceeds the available index entries, the
 # tool prints an info line and silently produces fewer shards rather than
-# erroring out (CL31's no-clamp behaviour).
+# erroring out (C025's no-clamp behaviour).
 
 # ---------------------------------------------------------------------------
-# CL32.1 — scatter --clamp on VCF: -n 100 → 28 shards
+# C20 — scatter --clamp on VCF: -n 100 → 28 shards
 # ---------------------------------------------------------------------------
 
-timed("CL32.1", "scatter --clamp VCF: 28 shards, records match"):
+timed("C20", "scatter --clamp VCF: 28 shards, records match"):
   let tmpDir = createTempDir("blocky_", "")
   # chr22_1kg.vcf.gz has 28 index entries; -n 100 must clamp to 28.
   let (outp, code) = run(
     &"scatter -n 100 --clamp -o {tmpDir}/shard_{{}}.vcf.gz {KgVcf}")
   doAssert code == 0,
-    &"CL32.1: --clamp should succeed, got {code}:\n{outp}"
+    &"C20: --clamp should succeed, got {code}:\n{outp}"
   doAssert "clamp" in outp,
-    &"CL32.1: info should mention 'clamp', got: {outp}"
+    &"C20: info should mention 'clamp', got: {outp}"
   let shards = toSeq(walkFiles(tmpDir / "shard_*.vcf.gz"))
   doAssert shards.len == 28,
-    &"CL32.1: expected 28 clamped shards, got {shards.len}"
+    &"C20: expected 28 clamped shards, got {shards.len}"
   # Sanity-check record count matches the original.
   let origCnt = execCmdEx(
     "bcftools query -f '%POS\\n' " & KgVcf & " 2>/dev/null | wc -l")[0].strip.parseInt
@@ -419,18 +418,18 @@ timed("CL32.1", "scatter --clamp VCF: 28 shards, records match"):
     outCnt += execCmdEx(
       "bcftools query -f '%POS\\n' " & s & " 2>/dev/null | wc -l")[0].strip.parseInt
   doAssert outCnt == origCnt,
-    &"CL32.1: record count mismatch: orig={origCnt} shards={outCnt}"
+    &"C20: record count mismatch: orig={origCnt} shards={outCnt}"
   removeDir(tmpDir)
 
 # ===========================================================================
-# CL40 — compress / decompress subcommands
+# C027 — compress / decompress subcommands
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# CL40.1 — compress file, then decompress: round-trip identity
+# C21 — compress file, then decompress: round-trip identity
 # ---------------------------------------------------------------------------
 
-timed("CL40.1", "compress/decompress round-trip: file identity"):
+timed("C21", "compress/decompress round-trip: file identity"):
   let tmpDir = createTempDir("blocky_", "")
   let rawPath = tmpDir / "small.vcf"
   # Create a raw VCF by decompressing the fixture.
@@ -440,32 +439,32 @@ timed("CL40.1", "compress/decompress round-trip: file identity"):
 
   # Compress — should create .gz and remove original.
   let (cOut, cCode) = run(&"compress {rawPath}")
-  doAssert cCode == 0, &"CL40.1: compress failed: {cOut}"
+  doAssert cCode == 0, &"C21: compress failed: {cOut}"
   let gzPath = rawPath & ".gz"
-  doAssert fileExists(gzPath), "CL40.1: compressed file not created"
-  doAssert not fileExists(rawPath), "CL40.1: original not removed after compress"
+  doAssert fileExists(gzPath), "C21: compressed file not created"
+  doAssert not fileExists(rawPath), "C21: original not removed after compress"
 
   # Verify BGZF magic.
   let gzData = readFile(gzPath)
-  doAssert gzData.len > 28, "CL40.1: compressed file too small"
+  doAssert gzData.len > 28, "C21: compressed file too small"
   doAssert gzData[0].byte == 0x1f and gzData[1].byte == 0x8b,
-    "CL40.1: missing gzip magic"
+    "C21: missing gzip magic"
 
   # Decompress — should create raw file and remove .gz.
   let (dOut, dCode) = run(&"decompress {gzPath}")
-  doAssert dCode == 0, &"CL40.1: decompress failed: {dOut}"
-  doAssert fileExists(rawPath), "CL40.1: decompressed file not created"
-  doAssert not fileExists(gzPath), "CL40.1: .gz not removed after decompress"
+  doAssert dCode == 0, &"C21: decompress failed: {dOut}"
+  doAssert fileExists(rawPath), "C21: decompressed file not created"
+  doAssert not fileExists(gzPath), "C21: .gz not removed after decompress"
   let roundTrip = readFile(rawPath)
   doAssert roundTrip == origData,
-    &"CL40.1: round-trip mismatch: orig={origData.len} got={roundTrip.len}"
+    &"C21: round-trip mismatch: orig={origData.len} got={roundTrip.len}"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL40.2 — compress -c / decompress -c: stdin/stdout pipe round-trip
+# C22 — compress -c / decompress -c: stdin/stdout pipe round-trip
 # ---------------------------------------------------------------------------
 
-timed("CL40.2", "compress/decompress -c: pipe round-trip"):
+timed("C22", "compress/decompress -c: pipe round-trip"):
   let tmpDir = createTempDir("blocky_", "")
   let rawPath = tmpDir / "small.vcf"
   discard execCmdEx(&"bgzip -d -c {SmallVcf} > {rawPath}")
@@ -474,52 +473,52 @@ timed("CL40.2", "compress/decompress -c: pipe round-trip"):
   let pipeMd5 = execCmdEx(
     &"cat {rawPath} | {BinPath} compress -c | {BinPath} decompress -c | md5sum")[0].split(' ')[0]
   doAssert pipeMd5 == origMd5,
-    &"CL40.2: pipe round-trip md5 mismatch: orig={origMd5} got={pipeMd5}"
+    &"C22: pipe round-trip md5 mismatch: orig={origMd5} got={pipeMd5}"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL40.3 — compress warns on already-compressed input
+# C23 — compress warns on already-compressed input
 # ---------------------------------------------------------------------------
 
-timed("CL40.3", "compress: warns on already-compressed input"):
+timed("C23", "compress: warns on already-compressed input"):
   let (outp, code) = run(&"compress -c {SmallVcf}")
   # Should succeed but warn.
-  doAssert code == 0, &"CL40.3: expected exit 0, got {code}"
+  doAssert code == 0, &"C23: expected exit 0, got {code}"
   doAssert "already" in outp.toLowerAscii,
-    &"CL40.3: expected warning about already-compressed, got: {outp}"
+    &"C23: expected warning about already-compressed, got: {outp}"
 
 # ---------------------------------------------------------------------------
-# CL40.4 — decompress warns on non-compressed input
+# C24 — decompress warns on non-compressed input
 # ---------------------------------------------------------------------------
 
-timed("CL40.4", "decompress: warns on non-compressed input"):
+timed("C24", "decompress: warns on non-compressed input"):
   let tmpDir = createTempDir("blocky_", "")
   let rawPath = tmpDir / "small.vcf.gz"  # named .gz but actually raw
   writeFile(rawPath, "##fileformat=VCFv4.2\n#CHROM\tPOS\n")
   let (outp, code) = run(&"decompress -c {rawPath}")
   # Should warn about non-compressed input.
   doAssert "not appear" in outp.toLowerAscii or "warning" in outp.toLowerAscii,
-    &"CL40.4: expected warning, got: {outp}"
+    &"C24: expected warning, got: {outp}"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL40.5 — decompress: non-.gz file without -c exits 1
+# C25 — decompress: non-.gz file without -c exits 1
 # ---------------------------------------------------------------------------
 
-timed("CL40.5", "decompress: non-.gz file without -c exits 1"):
+timed("C25", "decompress: non-.gz file without -c exits 1"):
   let tmpDir = createTempDir("blocky_", "")
   let rawPath = tmpDir / "data.vcf"
   writeFile(rawPath, "test")
   let (outp, code) = run(&"decompress {rawPath}")
-  doAssert code != 0, &"CL40.5: expected non-zero exit, got {code}: {outp}"
-  doAssert ".gz" in outp, &"CL40.5: error should mention .gz, got: {outp}"
+  doAssert code != 0, &"C25: expected non-zero exit, got {code}: {outp}"
+  doAssert ".gz" in outp, &"C25: error should mention .gz, got: {outp}"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL40.6 — compress: output already exists -> exits 1, original untouched
+# C26 — compress: output already exists -> exits 1, original untouched
 # ---------------------------------------------------------------------------
 
-timed("CL40.6", "compress: output exists -> exits 1"):
+timed("C26", "compress: output exists -> exits 1"):
   let tmpDir = createTempDir("blocky_", "")
   let rawPath = tmpDir / "small.vcf"
   let gzPath = rawPath & ".gz"
@@ -527,143 +526,143 @@ timed("CL40.6", "compress: output exists -> exits 1"):
   writeFile(gzPath, "existing")  # pre-existing output
   let origSize = getFileSize(rawPath)
   let (outp, code) = run(&"compress {rawPath}")
-  doAssert code != 0, &"CL40.6: expected non-zero exit, got {code}: {outp}"
-  doAssert "already exists" in outp, &"CL40.6: error should mention 'already exists', got: {outp}"
-  doAssert fileExists(rawPath), "CL40.6: original should not be removed"
-  doAssert getFileSize(rawPath) == origSize, "CL40.6: original should be untouched"
-  doAssert readFile(gzPath) == "existing", "CL40.6: existing .gz should be untouched"
+  doAssert code != 0, &"C26: expected non-zero exit, got {code}: {outp}"
+  doAssert "already exists" in outp, &"C26: error should mention 'already exists', got: {outp}"
+  doAssert fileExists(rawPath), "C26: original should not be removed"
+  doAssert getFileSize(rawPath) == origSize, "C26: original should be untouched"
+  doAssert readFile(gzPath) == "existing", "C26: existing .gz should be untouched"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL40.7 — decompress: output already exists -> exits 1, original untouched
+# C27 — decompress: output already exists -> exits 1, original untouched
 # ---------------------------------------------------------------------------
 
-timed("CL40.7", "decompress: output exists -> exits 1"):
+timed("C27", "decompress: output exists -> exits 1"):
   let tmpDir = createTempDir("blocky_", "")
   let rawPath = tmpDir / "small.vcf"
   let gzPath = rawPath & ".gz"
   # Create a valid .gz file to decompress.
   discard execCmdEx(&"bgzip -d -c {SmallVcf} > {rawPath}")
   discard execCmdEx(&"{BinPath} compress {rawPath}")
-  doAssert fileExists(gzPath), "CL40.7: setup failed"
+  doAssert fileExists(gzPath), "C27: setup failed"
   # Pre-create the output file to trigger the conflict.
   writeFile(rawPath, "existing")
   let origGzSize = getFileSize(gzPath)
   let (outp, code) = run(&"decompress {gzPath}")
-  doAssert code != 0, &"CL40.7: expected non-zero exit, got {code}: {outp}"
-  doAssert "already exists" in outp, &"CL40.7: error should mention 'already exists', got: {outp}"
-  doAssert fileExists(gzPath), "CL40.7: .gz should not be removed"
-  doAssert getFileSize(gzPath) == origGzSize, "CL40.7: .gz should be untouched"
-  doAssert readFile(rawPath) == "existing", "CL40.7: existing output should be untouched"
+  doAssert code != 0, &"C27: expected non-zero exit, got {code}: {outp}"
+  doAssert "already exists" in outp, &"C27: error should mention 'already exists', got: {outp}"
+  doAssert fileExists(gzPath), "C27: .gz should not be removed"
+  doAssert getFileSize(gzPath) == origGzSize, "C27: .gz should be untouched"
+  doAssert readFile(rawPath) == "existing", "C27: existing output should be untouched"
   removeDir(tmpDir)
 
 # ===========================================================================
-# CL50 — BED format: scatter, run, gather on non-VCF bgzipped file
+# C028 — BED format: scatter, run, gather on non-VCF bgzipped file
 # ===========================================================================
 
 const SmallBed = DataDir / "small.bed.gz"     # BED, TBI indexed, no headers
 const GtfFile  = DataDir / "gencode_5k.gtf.gz"  # GTF, TBI indexed, ## headers
 
 # ---------------------------------------------------------------------------
-# CL50.1 — scatter BED: 4 shards, line count matches
+# C28 — scatter BED: 4 shards, line count matches
 # ---------------------------------------------------------------------------
 
-timed("CL50.1", "scatter BED: shards, line count matches"):
+timed("C28", "scatter BED: shards, line count matches"):
   doAssert fileExists(SmallBed), "BED fixture missing — run generate_fixtures.sh"
   let tmpDir = createTempDir("blocky_", "")
   let (outp, code) = run(
     &"scatter -n 4 --clamp -o {tmpDir}/shard_{{}}.bed.gz {SmallBed}")
-  doAssert code == 0, &"CL50.1: scatter failed ({code}): {outp}"
+  doAssert code == 0, &"C28: scatter failed ({code}): {outp}"
   let shards = toSeq(walkFiles(tmpDir / "shard_*.bed.gz"))
-  doAssert shards.len >= 1, &"CL50.1: expected at least 1 shard, got {shards.len}"
+  doAssert shards.len >= 1, &"C28: expected at least 1 shard, got {shards.len}"
   let origCnt = execCmdEx(&"bgzip -d -c {SmallBed} | wc -l")[0].strip.parseInt
   var shardCnt = 0
   for s in shards:
     shardCnt += execCmdEx(&"bgzip -d -c {s} | wc -l")[0].strip.parseInt
   doAssert shardCnt == origCnt,
-    &"CL50.1: line count mismatch: orig={origCnt} shards={shardCnt}"
+    &"C28: line count mismatch: orig={origCnt} shards={shardCnt}"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL50.2 — run BED: 4 workers, cat stage, output matches original
+# C29 — run BED: 4 workers, cat stage, output matches original
 # ---------------------------------------------------------------------------
 
-timed("CL50.2", "run BED: 4 workers, cat stage"):
+timed("C29", "run BED: 4 workers, cat stage"):
   doAssert fileExists(SmallBed), "BED fixture missing"
   let tmpDir = createTempDir("blocky_", "")
   let outPath = tmpDir / "out.bed.gz"
   let (outp, code) = run(
     &"run -n 4 --clamp -o {outPath} {SmallBed} ::: cat")
-  doAssert code == 0, &"CL50.2: run failed ({code}): {outp}"
+  doAssert code == 0, &"C29: run failed ({code}): {outp}"
   let origCnt = execCmdEx(&"bgzip -d -c {SmallBed} | wc -l")[0].strip.parseInt
   let outCnt = execCmdEx(&"bgzip -d -c {outPath} | wc -l")[0].strip.parseInt
   doAssert outCnt == origCnt,
-    &"CL50.2: line count mismatch: orig={origCnt} out={outCnt}"
+    &"C29: line count mismatch: orig={origCnt} out={outCnt}"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL50.3 — scatter GTF: 4 shards, line count matches (skipped if no fixture)
+# C30 — scatter GTF: 4 shards, line count matches (skipped if no fixture)
 # ---------------------------------------------------------------------------
 
-timed("CL50.3", "scatter GTF: 4 shards, line count matches"):
+timed("C30", "scatter GTF: 4 shards, line count matches"):
   if fileExists(GtfFile):
     let tmpDir = createTempDir("blocky_", "")
     let (outp, code) = run(
       &"scatter -n 4 --clamp -o {tmpDir}/shard_{{}}.gtf.gz {GtfFile}")
-    doAssert code == 0, &"CL50.3: scatter failed ({code}): {outp}"
+    doAssert code == 0, &"C30: scatter failed ({code}): {outp}"
     let shards = toSeq(walkFiles(tmpDir / "shard_*.gtf.gz"))
-    doAssert shards.len >= 1, &"CL50.3: expected at least 1 shard, got {shards.len}"
+    doAssert shards.len >= 1, &"C30: expected at least 1 shard, got {shards.len}"
     # Count data lines only (exclude # headers — each shard includes headers).
     let origCnt = execCmdEx(&"bgzip -d -c {GtfFile} | grep -cv '^#'")[0].strip.parseInt
     var shardCnt = 0
     for s in shards:
       shardCnt += execCmdEx(&"bgzip -d -c {s} | grep -cv '^#'")[0].strip.parseInt
     doAssert shardCnt == origCnt,
-      &"CL50.3: data line count mismatch: orig={origCnt} shards={shardCnt}"
+      &"C30: data line count mismatch: orig={origCnt} shards={shardCnt}"
     removeDir(tmpDir)
   else:
     echo "  [skipped — gencode_5k.gtf.gz not found]"
 
 # ===========================================================================
-# CL51 — --scan on unindexed file
+# C029 — --scan on unindexed file
 # ===========================================================================
 
 const SmallTsv = DataDir / "small_noindex.tsv.gz"  # unindexed, # header
 
 # ---------------------------------------------------------------------------
-# CL51.1 — scatter --scan unindexed TSV: 4 shards, line count matches
+# C31 — scatter --scan unindexed TSV: 4 shards, line count matches
 # ---------------------------------------------------------------------------
 
-timed("CL51.1", "scatter --scan unindexed TSV: line count matches"):
+timed("C31", "scatter --scan unindexed TSV: line count matches"):
   doAssert fileExists(SmallTsv), "TSV fixture missing — run generate_fixtures.sh"
   let tmpDir = createTempDir("blocky_", "")
   let (outp, code) = run(
     &"scatter -n 4 --scan --clamp -o {tmpDir}/shard_{{}}.tsv.gz {SmallTsv}")
-  doAssert code == 0, &"CL51.1: scatter failed ({code}): {outp}"
+  doAssert code == 0, &"C31: scatter failed ({code}): {outp}"
   let shards = toSeq(walkFiles(tmpDir / "shard_*.tsv.gz"))
-  doAssert shards.len >= 1, &"CL51.1: expected at least 1 shard, got {shards.len}"
+  doAssert shards.len >= 1, &"C31: expected at least 1 shard, got {shards.len}"
   # Count data lines only (exclude # headers — each shard includes headers).
   let origCnt = execCmdEx(&"bgzip -d -c {SmallTsv} | grep -cv '^#'")[0].strip.parseInt
   var shardCnt = 0
   for s in shards:
     shardCnt += execCmdEx(&"bgzip -d -c {s} | grep -cv '^#'")[0].strip.parseInt
   doAssert shardCnt == origCnt,
-    &"CL51.1: data line count mismatch: orig={origCnt} shards={shardCnt}"
+    &"C31: data line count mismatch: orig={origCnt} shards={shardCnt}"
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# CL51.2 — auto-scan unindexed TSV: warning + shards produced
+# C32 — auto-scan unindexed TSV: warning + shards produced
 # ---------------------------------------------------------------------------
 
-timed("CL51.2", "auto-scan unindexed TSV: warning + shards produced"):
+timed("C32", "auto-scan unindexed TSV: warning + shards produced"):
   doAssert fileExists(SmallTsv), "TSV fixture missing"
   let tmpDir = createTempDir("blocky_", "")
   let (outp, code) = run(
     &"scatter -n 4 --clamp -o {tmpDir}/shard_{{}}.tsv.gz {SmallTsv}")
-  doAssert code == 0, &"CL51.2: scatter failed ({code}): {outp}"
+  doAssert code == 0, &"C32: scatter failed ({code}): {outp}"
   doAssert "warning" in outp.toLowerAscii,
-    &"CL51.2: expected warning about missing index, got: {outp}"
+    &"C32: expected warning about missing index, got: {outp}"
   let shards = toSeq(walkFiles(tmpDir / "shard_*.tsv.gz"))
-  doAssert shards.len >= 1, &"CL51.2: expected at least 1 shard, got {shards.len}"
+  doAssert shards.len >= 1, &"C32: expected at least 1 shard, got {shards.len}"
   removeDir(tmpDir)
 

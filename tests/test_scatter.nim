@@ -4,10 +4,7 @@
 
 echo "--------------- Test Scatter ---------------"
 
-import std/[algorithm, math, os, osproc, posix, strformat, strutils, tempfiles]
-{.warning[Deprecated]: off.}
-import std/threadpool
-{.warning[Deprecated]: on.}
+import std/[algorithm, math, os, posix, strformat, strutils, tempfiles]
 import test_utils
 import "../src/blocky/bgzf"
 import "../src/blocky/scatter"
@@ -27,13 +24,13 @@ proc readMagic(path: string; offset: int64): array[3, byte] =
   discard readBytes(f, result, 0, 3)
 
 # ===========================================================================
-# SC1 — Index parsing: TBI and CSI virtual offsets
+# S01–S04 — Index parsing: TBI and CSI virtual offsets
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# SC1.1 — parseTbiVirtualOffsets: voffs non-empty, sorted, block_off has BGZF magic
+# S01 — parseTbiVirtualOffsets: voffs non-empty, sorted, block_off has BGZF magic
 # ---------------------------------------------------------------------------
-timed("SC1.1", "parseTbiVirtualOffsets: virtual offsets valid"):
+timed("S01", "parseTbiVirtualOffsets: virtual offsets valid"):
   let voffs = parseTbiVirtualOffsets(SmallVcf & ".tbi")
   doAssert voffs.len > 0, "parseTbiVirtualOffsets: no entries"
   for i in 1 ..< voffs.len:
@@ -45,16 +42,16 @@ timed("SC1.1", "parseTbiVirtualOffsets: virtual offsets valid"):
       &"bad BGZF magic at offset {v[0]}"
 
 # ---------------------------------------------------------------------------
-# SC1.2 — readIndexVirtualOffsets falls back to TBI when no .csi present
+# S02 — readIndexVirtualOffsets falls back to TBI when no .csi present
 # ---------------------------------------------------------------------------
-timed("SC1.2", "readIndexVirtualOffsets via TBI"):
+timed("S02", "readIndexVirtualOffsets via TBI"):
   let voffs = readIndexVirtualOffsets(SmallVcf)
   doAssert voffs.len > 0, "readIndexVirtualOffsets (TBI): no entries"
 
 # ---------------------------------------------------------------------------
-# SC1.3 — parseCsiVirtualOffsets: CSI-only fixture
+# S03 — parseCsiVirtualOffsets: CSI-only fixture
 # ---------------------------------------------------------------------------
-timed("SC1.3", "parseCsiVirtualOffsets: virtual offsets valid"):
+timed("S03", "parseCsiVirtualOffsets: virtual offsets valid"):
   doAssert fileExists(CsiVcf & ".csi"), "CSI fixture missing — run generate_fixtures.sh"
   doAssert not fileExists(CsiVcf & ".tbi"), "CSI fixture must not have a .tbi alongside it"
   let voffs = parseCsiVirtualOffsets(CsiVcf & ".csi")
@@ -68,20 +65,20 @@ timed("SC1.3", "parseCsiVirtualOffsets: virtual offsets valid"):
       &"bad BGZF magic at offset {v[0]}"
 
 # ---------------------------------------------------------------------------
-# SC1.4 — readIndexVirtualOffsets falls through to CSI when no .tbi present
+# S04 — readIndexVirtualOffsets falls through to CSI when no .tbi present
 # ---------------------------------------------------------------------------
-timed("SC1.4", "readIndexVirtualOffsets via CSI"):
+timed("S04", "readIndexVirtualOffsets via CSI"):
   let voffs = readIndexVirtualOffsets(CsiVcf)
   doAssert voffs.len > 0, "readIndexVirtualOffsets (CSI): no entries"
 
 # ===========================================================================
-# SC5–SC10 — Boundary computation: header extraction, lengths, partition, validation
+# S05 — Header extraction and first block
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# SC5 — testGetHeaderAndFirstBlock: header is valid BGZF, starts with '#'; firstBlock has BGZF magic
+# S05 — testGetHeaderAndFirstBlock: header is valid BGZF, starts with '#'; firstBlock has BGZF magic
 # ---------------------------------------------------------------------------
-timed("SC2.1", "getHeaderAndFirstBlock: header valid, firstBlock has BGZF magic"):
+timed("S05", "getHeaderAndFirstBlock: header valid, firstBlock has BGZF magic"):
   let (hdrBytes, firstBlock) = getHeaderAndFirstBlock(SmallVcf)
   # Compressed header must be a valid BGZF block
   doAssert bgzfBlockSize(hdrBytes) > 0,
@@ -96,13 +93,13 @@ timed("SC2.1", "getHeaderAndFirstBlock: header valid, firstBlock has BGZF magic"
   doAssert magic[0] == 0x1f and magic[1] == 0x8b,
     &"getHeaderAndFirstBlock: firstBlock {firstBlock} has bad BGZF magic"
 
-# SC3.1-SC3.4 (partitionBoundaries, isValidBoundary, optimiseBoundaries) removed:
+# (partitionBoundaries, isValidBoundary, optimiseBoundaries) removed:
 # these procs no longer exist after Milestone V — scatter now uses index virtual
 # offsets directly, eliminating boundary search. End-to-end scatter correctness
-# is covered by SC11+ (checkShards) and CL10+ in test_cli.nim.
+# is covered by S06+ (checkShards) and C11+ in test_cli.nim.
 
 # ===========================================================================
-# SC11–SC15 — VCF scatter end-to-end (TBI, CSI, --force-scan)
+# S06–S10 — VCF scatter end-to-end (TBI, CSI, --force-scan)
 # ===========================================================================
 
 proc collectRecords(data: seq[byte]): seq[string] =
@@ -165,9 +162,9 @@ proc checkShards(vcfPath: string; tmpl: string; n: int) =
     "shard records do not match original"
 
 # ---------------------------------------------------------------------------
-# SC12 — testScatter4ShardsTbi: 4 shards (TBI); BGZF structure, completeness, order, size balance
+# S06 — testScatter4ShardsTbi: 4 shards (TBI); BGZF structure, completeness, order, size balance
 # ---------------------------------------------------------------------------
-timed("SC5.1", "scatter TBI: 4 shards, completeness, order, balance"):
+timed("S06", "scatter TBI: 4 shards, completeness, order, balance"):
   let tmpDir = createTempDir("blocky_", "")
   let tmpl = tmpDir / "shard.{}.vcf.gz"
   scatter(SmallVcf, 4, tmpl)
@@ -184,9 +181,9 @@ timed("SC5.1", "scatter TBI: 4 shards, completeness, order, balance"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# SC14 — testScatterForceScan: forceScan=true ignores index; result matches indexed scatter
+# S07 — testScatterForceScan: forceScan=true ignores index; result matches indexed scatter
 # ---------------------------------------------------------------------------
-timed("SC5.2", "scatter --force-scan: completeness, order"):
+timed("S07", "scatter --force-scan: completeness, order"):
   ## scatter with forceScan=true on a fully indexed file — index is ignored.
   let tmpDir = createTempDir("blocky_", "")
   let tmpl = tmpDir / "shard.{}.vcf.gz"
@@ -195,9 +192,9 @@ timed("SC5.2", "scatter --force-scan: completeness, order"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# SC15 — testScatter4ShardsCsi: 4 shards (CSI); BGZF structure, completeness, order
+# S08 — testScatter4ShardsCsi: 4 shards (CSI); BGZF structure, completeness, order
 # ---------------------------------------------------------------------------
-timed("SC5.3", "scatter CSI: 4 shards, completeness, order"):
+timed("S08", "scatter CSI: 4 shards, completeness, order"):
   doAssert fileExists(CsiVcf & ".csi"), "CSI fixture missing — run generate_fixtures.sh"
   let tmpDir = createTempDir("blocky_", "")
   let tmpl = tmpDir / "shard.{}.vcf.gz"
@@ -208,7 +205,7 @@ timed("SC5.3", "scatter CSI: 4 shards, completeness, order"):
 # ---------------------------------------------------------------------------
 # SC5.4 — scatter GZI: 4 shards (GZI scan shortcut); completeness, order
 # ---------------------------------------------------------------------------
-timed("SC5.4", "scatter GZI: 4 shards, completeness, order"):
+timed("S09", "scatter GZI: 4 shards, completeness, order"):
   if fileExists(GziVcf & ".gzi"):
     let tmpDir = createTempDir("blocky_", "")
     let tmpl = tmpDir / "shard.{}.vcf.gz"
@@ -221,7 +218,7 @@ timed("SC5.4", "scatter GZI: 4 shards, completeness, order"):
 # ---------------------------------------------------------------------------
 # SC5.5 — scatter unaligned blocks: records span BGZF block boundaries
 # ---------------------------------------------------------------------------
-timed("SC5.5", "scatter unaligned blocks: completeness, order"):
+timed("S10", "scatter unaligned blocks: completeness, order"):
   if fileExists(UnalignedVcf):
     let tmpDir = createTempDir("blocky_", "")
     let tmpl = tmpDir / "shard.{}.vcf.gz"
@@ -232,7 +229,7 @@ timed("SC5.5", "scatter unaligned blocks: completeness, order"):
     echo "  [skipped — small_unaligned.vcf.gz not found, run generate_fixtures.sh]"
 
 # ===========================================================================
-# SC16–SC20 — BCF: header extraction and scatter end-to-end
+# S11–S14 — BCF: header extraction and scatter end-to-end
 # ===========================================================================
 
 proc leU32At(data: seq[byte]; pos: int): uint32 =
@@ -240,9 +237,9 @@ proc leU32At(data: seq[byte]; pos: int): uint32 =
   (data[pos+2].uint32 shl 16) or (data[pos+3].uint32 shl 24)
 
 # ---------------------------------------------------------------------------
-# SC16 — testExtractBcfHeaderSmall: BGZF magic, BCF magic, l_text > 0, total decompressed == 5+4+l_text
+# S11 — testExtractBcfHeaderSmall: BGZF magic, BCF magic, l_text > 0, total decompressed == 5+4+l_text
 # ---------------------------------------------------------------------------
-timed("SC6.1", "extractBcfHeader: small.bcf"):
+timed("S11", "extractBcfHeader: small.bcf"):
   let (rawHdr, _, _) = extractBcfHeaderAndFirstOffset(SmallBcf)
   let hdrBytes = compressToBgzfMulti(rawHdr)
   # Must be a valid BGZF block sequence
@@ -273,9 +270,9 @@ timed("SC6.1", "extractBcfHeader: small.bcf"):
     &"extractBcfHeader: decompressed {totalDecomp} bytes, expected {expectedSize}"
 
 # ---------------------------------------------------------------------------
-# SC17 — testExtractBcfHeaderLarge: large BCF (2504 samples); multi-block header decompresses correctly
+# S12 — testExtractBcfHeaderLarge: large BCF (2504 samples); multi-block header decompresses correctly
 # ---------------------------------------------------------------------------
-timed("SC6.2", "extractBcfHeader: chr22_1kg.bcf large header"):
+timed("S12", "extractBcfHeader: chr22_1kg.bcf large header"):
   # chr22_1kg.bcf has 2504 samples — verify extractBcfHeader handles it correctly.
   doAssert fileExists(KgBcf), &"large BCF fixture missing: {KgBcf}"
   let (rawHdr2, _, _) = extractBcfHeaderAndFirstOffset(KgBcf)
@@ -385,9 +382,9 @@ proc checkBcfShards(bcfPath: string; tmpl: string; n: int) =
     "BCF: shard records do not match original"
 
 # ---------------------------------------------------------------------------
-# SC19 — testBcfScatter4Shards: 4 BCF shards; BGZF, BCF magic, completeness, order, size balance
+# S13 — testBcfScatter4Shards: 4 BCF shards; BGZF, BCF magic, completeness, order, size balance
 # ---------------------------------------------------------------------------
-timed("SC7.1", "BCF scatter: 4 shards, completeness, order, balance"):
+timed("S13", "BCF scatter: 4 shards, completeness, order, balance"):
   doAssert fileExists(SmallBcf), &"BCF fixture missing: {SmallBcf}"
   let tmpDir = createTempDir("blocky_", "")
   let tmpl = tmpDir / "shard.{}.bcf"
@@ -403,9 +400,9 @@ timed("SC7.1", "BCF scatter: 4 shards, completeness, order, balance"):
   removeDir(tmpDir)
 
 # ---------------------------------------------------------------------------
-# SC20 — testBcfScatterLargeHeader: 4 BCF shards from 1KG (large header); completeness and order
+# S14 — testBcfScatterLargeHeader: 4 BCF shards from 1KG (large header); completeness and order
 # ---------------------------------------------------------------------------
-timed("SC7.2", "BCF scatter: chr22_1kg.bcf large header, 4 shards"):
+timed("S14", "BCF scatter: chr22_1kg.bcf large header, 4 shards"):
   doAssert fileExists(KgBcf), &"large BCF fixture missing: {KgBcf}"
   let tmpDir = createTempDir("blocky_", "")
   let tmpl = tmpDir / "shard.{}.bcf"

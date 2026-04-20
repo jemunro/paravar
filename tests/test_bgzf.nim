@@ -1,4 +1,4 @@
-## Tests for bgzf.nim — BGZF I/O (V1), format sniffing (V2), file format sniffing (V3).
+## Tests for bgzf — BGZF I/O, format sniffing, file format sniffing, GZI, copyRange.
 ## Run from project root: nim c -r tests/test_vcf_utils.nim
 
 echo "--------------- Test BGZF ---------------"
@@ -37,14 +37,14 @@ proc readFileSlice(path: string; start: int64; length: int): seq[byte] =
   discard readBytes(f, result, 0, length)
 
 # ===========================================================================
-# V1 — BGZF I/O: block scanning, raw copy, compress/decompress, split, CRC
+# B01–B06 — BGZF I/O: block scanning, compress/decompress, CRC
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# V1.1 — scanBgzfBlockStarts: offsets valid, first=0, last block is 28-byte EOF
+# B01 — scanBgzfBlockStarts: offsets valid, first=0, last block is 28-byte EOF
 # ---------------------------------------------------------------------------
 
-timed("V1.1", "scanBgzfBlockStarts: offsets valid, first=0, last is EOF"):
+timed("B01", "scanBgzfBlockStarts: offsets valid, first=0, last is EOF"):
   let starts = scanBgzfBlockStarts(SmallVcf)
   doAssert starts.len >= 2,
     &"expected >= 2 blocks (data + EOF), got {starts.len}"
@@ -60,10 +60,10 @@ timed("V1.1", "scanBgzfBlockStarts: offsets valid, first=0, last is EOF"):
     &"expected EOF block of 28 bytes, got {blkSize}"
 
 # ---------------------------------------------------------------------------
-# V1.2 — scanBgzfBlockStarts range: range-limited scan truncates correctly
+# B02 — scanBgzfBlockStarts range: range-limited scan truncates correctly
 # ---------------------------------------------------------------------------
 
-timed("V1.2", "scanBgzfBlockStarts range: truncates at upper bound"):
+timed("B02", "scanBgzfBlockStarts range: truncates at upper bound"):
   let allStarts = scanBgzfBlockStarts(SmallVcf)
   doAssert allStarts.len >= 2
   let first = scanBgzfBlockStarts(SmallVcf, 0, allStarts[1])
@@ -71,10 +71,10 @@ timed("V1.2", "scanBgzfBlockStarts range: truncates at upper bound"):
     &"range scan: expected [{allStarts[0]}], got {first}"
 
 # ---------------------------------------------------------------------------
-# V1.4 — compressToBgzf/decompressBgzf round-trip
+# B03 — compressToBgzf/decompressBgzf round-trip
 # ---------------------------------------------------------------------------
 
-timed("V1.4", "compressToBgzf/decompressBgzf: round-trip"):
+timed("B03", "compressToBgzf/decompressBgzf: round-trip"):
   let original = "Hello, BGZF world!\nSecond line.\n"
   let origBytes = cast[seq[byte]](original)
   let compressed = compressToBgzf(origBytes)
@@ -87,20 +87,20 @@ timed("V1.4", "compressToBgzf/decompressBgzf: round-trip"):
     &"round-trip mismatch: {decompressed} != {origBytes}"
 
 # ---------------------------------------------------------------------------
-# V1.5 — round-trip empty: empty input compresses and decompresses correctly
+# B04 — round-trip empty: empty input compresses and decompresses correctly
 # ---------------------------------------------------------------------------
 
-timed("V1.5", "round-trip empty: empty input"):
+timed("B04", "round-trip empty: empty input"):
   let compressed = compressToBgzf(@[])
   doAssert bgzfBlockSize(compressed) > 0, "empty compress: invalid block header"
   let decompressed = decompressBgzf(compressed)
   doAssert decompressed.len == 0, "empty round-trip: expected empty result"
 
 # ---------------------------------------------------------------------------
-# V1.6 — decompressBgzf fixture: real fixture block starts with '#'
+# B05 — decompressBgzf fixture: real fixture block starts with '#'
 # ---------------------------------------------------------------------------
 
-timed("V1.6", "decompressBgzf fixture: real block decompresses"):
+timed("B05", "decompressBgzf fixture: real block decompresses"):
   let starts = scanBgzfBlockStarts(SmallVcf)
   var dataStart = -1'i64
   var dataSize  = 0
@@ -118,17 +118,17 @@ timed("V1.6", "decompressBgzf fixture: real block decompresses"):
   doAssert decompressed[0] == byte('#') or decompressed[0] == byte('c'),
     &"unexpected first byte: {decompressed[0]}"
 
-# V1.7-V1.11 (splitChunk, bcfFirstDataOffset, splitBcfBoundaryBlock) removed:
+# (splitChunk, bcfFirstDataOffset, splitBcfBoundaryBlock removed:
 # these procs no longer exist after Milestone V — scatter splits exclusively
 # at index virtual offsets via splitBgzfBlockAtUOffset, eliminating the
 # midpoint-line/record search and the bcfFirstDataOffset helper. End-to-end
 # scatter correctness for both formats is covered by CL10-CL13 in test_cli.nim.
 
 # ---------------------------------------------------------------------------
-# V1.12 — BGZF CRC32 validation: stored CRC matches computed value
+# B06 — BGZF CRC32 validation: stored CRC matches computed value
 # ---------------------------------------------------------------------------
 
-timed("V1.12", "BGZF CRC32: stored matches computed"):
+timed("B06", "BGZF CRC32: stored matches computed"):
   doAssert fileExists(SmallVcf), "fixture missing"
   let starts = scanBgzfBlockStarts(SmallVcf)
   var testOff = -1'i64
@@ -153,14 +153,14 @@ timed("V1.12", "BGZF CRC32: stored matches computed"):
     &"BGZF CRC32 mismatch: stored={storedCrc:#x} computed={computedCrc:#x}"
 
 # ===========================================================================
-# V2 — Format sniffing: isBgzfStream, sniffFormat, sniffStreamFormat
+# B07–B13 — Format sniffing: isBgzfStream, sniffFormat, sniffStreamFormat
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# V2.1 — isBgzfStream: BGZF magic detected; plain gzip and random bytes rejected
+# B07 — isBgzfStream: BGZF magic detected; plain gzip and random bytes rejected
 # ---------------------------------------------------------------------------
 
-timed("V2.1", "isBgzfStream: BGZF magic detected, non-BGZF rejected"):
+timed("B07", "isBgzfStream: BGZF magic detected, non-BGZF rejected"):
   let bgzfHead = [0x1f'u8, 0x8b, 0x08, 0x04, 0x00]
   doAssert isBgzfStream(bgzfHead), "should detect BGZF magic"
 
@@ -174,10 +174,10 @@ timed("V2.1", "isBgzfStream: BGZF magic detected, non-BGZF rejected"):
   doAssert not isBgzfStream(short), "too-short buffer is not BGZF"
 
 # ---------------------------------------------------------------------------
-# V2.2 — sniffFormat: BCF/VCF/text detected from uncompressed bytes
+# B08 — sniffFormat: BCF/VCF/text detected from uncompressed bytes
 # ---------------------------------------------------------------------------
 
-timed("V2.2", "sniffFormat: BCF/VCF/text detected correctly"):
+timed("B08", "sniffFormat: BCF/VCF/text detected correctly"):
   let bcfBytes = [byte('B'), byte('C'), byte('F'), 0x02'u8, 0x02'u8, 0x00'u8]
   doAssert sniffFormat(bcfBytes) == ffBcf, "BCF magic -> ffBcf"
 
@@ -197,10 +197,10 @@ timed("V2.2", "sniffFormat: BCF/VCF/text detected correctly"):
   doAssert sniffFormat(bcfExact) == ffBcf, "exact BCF magic length -> ffBcf"
 
 # ---------------------------------------------------------------------------
-# V2.3 — sniffStreamFormat BCF: small.bcf detected as BCF/BGZF
+# B09 — sniffStreamFormat BCF: small.bcf detected as BCF/BGZF
 # ---------------------------------------------------------------------------
 
-timed("V2.3", "sniffStreamFormat: BCF/BGZF"):
+timed("B09", "sniffStreamFormat: BCF/BGZF"):
   doAssert fileExists(SmallBcf), "BCF fixture missing"
   let f = open(SmallBcf, fmRead)
   var buf = newSeq[byte](65536)
@@ -212,10 +212,10 @@ timed("V2.3", "sniffStreamFormat: BCF/BGZF"):
   doAssert isBgzf,         "small.bcf: expected BGZF stream"
 
 # ---------------------------------------------------------------------------
-# V2.4 — sniffStreamFormat VCF: small.vcf.gz detected as VCF/BGZF
+# B10 — sniffStreamFormat VCF: small.vcf.gz detected as VCF/BGZF
 # ---------------------------------------------------------------------------
 
-timed("V2.4", "sniffStreamFormat: VCF/BGZF"):
+timed("B10", "sniffStreamFormat: VCF/BGZF"):
   doAssert fileExists(SmallVcf), "VCF fixture missing"
   let f = open(SmallVcf, fmRead)
   var buf = newSeq[byte](65536)
@@ -227,10 +227,10 @@ timed("V2.4", "sniffStreamFormat: VCF/BGZF"):
   doAssert isBgzf,         "small.vcf.gz: expected BGZF stream"
 
 # ---------------------------------------------------------------------------
-# V2.5 — sniffStreamFormat text: plain text detected as text/uncompressed
+# B11 — sniffStreamFormat text: plain text detected as text/uncompressed
 # ---------------------------------------------------------------------------
 
-timed("V2.5", "sniffStreamFormat: text/uncompressed"):
+timed("B11", "sniffStreamFormat: text/uncompressed"):
   var raw: seq[byte]
   for c in "col1\tcol2\tcol3\nhello\tworld\t42\n":
     raw.add(byte(c))
@@ -239,10 +239,10 @@ timed("V2.5", "sniffStreamFormat: text/uncompressed"):
   doAssert not isBgzf,    "plain text: should not be BGZF"
 
 # ---------------------------------------------------------------------------
-# V2.6 — sniffStreamFormat uncompressed VCF: VCF/uncompressed
+# B12 — sniffStreamFormat uncompressed VCF: VCF/uncompressed
 # ---------------------------------------------------------------------------
 
-timed("V2.6", "sniffStreamFormat: uncompressed VCF"):
+timed("B12", "sniffStreamFormat: uncompressed VCF"):
   var raw: seq[byte]
   for c in "##fileformatVCFv4.2\n##source=blocky\n#CHROM\tPOS\n":
     raw.add(byte(c))
@@ -251,10 +251,10 @@ timed("V2.6", "sniffStreamFormat: uncompressed VCF"):
   doAssert not isBgzf,    "uncompressed VCF: should not be BGZF"
 
 # ---------------------------------------------------------------------------
-# V2.7 — sniffStreamFormat compressed text: BGZF text detected as text/BGZF
+# B13 — sniffStreamFormat compressed text: BGZF text detected as text/BGZF
 # ---------------------------------------------------------------------------
 
-timed("V2.7", "sniffStreamFormat: BGZF-compressed text"):
+timed("B13", "sniffStreamFormat: BGZF-compressed text"):
   var raw: seq[byte]
   for c in "hello world\n":
     raw.add(byte(c))
@@ -264,105 +264,99 @@ timed("V2.7", "sniffStreamFormat: BGZF-compressed text"):
   doAssert isBgzf,         "BGZF text: expected BGZF stream"
 
 # ===========================================================================
-# V3 — File format sniffing: sniffFileFormat
+# B14–B17 — File format sniffing: sniffFileFormat
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# V3.1 — sniffFileFormat VCF BGZF: small.vcf.gz
+# B14 — sniffFileFormat VCF BGZF: small.vcf.gz
 # ---------------------------------------------------------------------------
 
-timed("V3.1", "sniffFileFormat: VCF BGZF"):
+timed("B14", "sniffFileFormat: VCF BGZF"):
   doAssert fileExists(SmallVcf), "fixture missing: " & SmallVcf
   let (fmt, compressed) = sniffFileFormat(SmallVcf)
-  doAssert fmt == ffVcf,  "V3.1: expected ffVcf, got " & $fmt
-  doAssert compressed,    "V3.1: expected compressed=true"
+  doAssert fmt == ffVcf,  "B14: expected ffVcf, got " & $fmt
+  doAssert compressed,    "B14: expected compressed=true"
 
 # ---------------------------------------------------------------------------
-# V3.2 — sniffFileFormat BCF BGZF: small.bcf
+# B15 — sniffFileFormat BCF BGZF: small.bcf
 # ---------------------------------------------------------------------------
 
-timed("V3.2", "sniffFileFormat: BCF BGZF"):
+timed("B15", "sniffFileFormat: BCF BGZF"):
   doAssert fileExists(SmallBcf), "fixture missing: " & SmallBcf
   let (fmt, compressed) = sniffFileFormat(SmallBcf)
-  doAssert fmt == ffBcf,  "V3.2: expected ffBcf, got " & $fmt
-  doAssert compressed,    "V3.2: expected compressed=true"
+  doAssert fmt == ffBcf,  "B15: expected ffBcf, got " & $fmt
+  doAssert compressed,    "B15: expected compressed=true"
 
 # ---------------------------------------------------------------------------
-# V3.3 — sniffFileFormat uncompressed VCF
+# B16 — sniffFileFormat uncompressed VCF
 # ---------------------------------------------------------------------------
 
-timed("V3.3", "sniffFileFormat: uncompressed VCF"):
+timed("B16", "sniffFileFormat: uncompressed VCF"):
   let tmp = getTempDir() / "blocky_sniff_test_v3_3.vcf"
   writeFile(tmp, "##fileformat=VCFv4.1\n#CHROM\tPOS\tID\tREF\tALT\n")
   let (fmt, compressed) = sniffFileFormat(tmp)
-  doAssert fmt == ffVcf,   "V3.3: expected ffVcf, got " & $fmt
-  doAssert not compressed, "V3.3: expected compressed=false"
+  doAssert fmt == ffVcf,   "B16: expected ffVcf, got " & $fmt
+  doAssert not compressed, "B16: expected compressed=false"
   removeFile(tmp)
 
 # ---------------------------------------------------------------------------
-# V3.4 — sniffFileFormat uncompressed BCF (magic bytes only)
+# B17 — sniffFileFormat uncompressed BCF (magic bytes only)
 # ---------------------------------------------------------------------------
 
-timed("V3.4", "sniffFileFormat: uncompressed BCF magic"):
+timed("B17", "sniffFileFormat: uncompressed BCF magic"):
   let tmp = getTempDir() / "blocky_sniff_test_v3_4.bcf_raw"
   let magic: seq[byte] = @[byte('B'), byte('C'), byte('F'), 0x02'u8, 0x02'u8]
   var f = open(tmp, fmWrite)
   discard f.writeBytes(magic, 0, magic.len)
   f.close()
   let (fmt, compressed) = sniffFileFormat(tmp)
-  doAssert fmt == ffBcf,   "V3.4: expected ffBcf, got " & $fmt
-  doAssert not compressed, "V3.4: expected compressed=false"
+  doAssert fmt == ffBcf,   "B17: expected ffBcf, got " & $fmt
+  doAssert not compressed, "B17: expected compressed=false"
   removeFile(tmp)
 
 # ===========================================================================
-# V4 — GZI index parsing
+# B18–B19 — GZI index parsing
 # ===========================================================================
 
-const Kg22Vcf = DataDir / "chr22_1kg.vcf.gz"
-const Kg22Gzi = Kg22Vcf & ".gzi"
+const GziVcf = DataDir / "small_gzi.vcf.gz"
+const GziIdx = GziVcf & ".gzi"
 
 # ---------------------------------------------------------------------------
-# V4.1 — parseGziBlockStarts: offsets non-empty, sorted, first is 0
+# B18 — parseGziBlockStarts: offsets non-empty, sorted, first is 0
 # ---------------------------------------------------------------------------
 
-timed("V4.1", "parseGziBlockStarts: offsets non-empty, sorted, first=0"):
-  if fileExists(Kg22Gzi):
-    let starts = parseGziBlockStarts(Kg22Gzi)
-    doAssert starts.len > 0, "GZI should have at least one entry"
-    doAssert starts[0] == 0, &"first GZI offset should be 0, got {starts[0]}"
-    for i in 1 ..< starts.len:
-      doAssert starts[i] > starts[i - 1],
-        &"GZI offsets not sorted at index {i}: {starts[i-1]} >= {starts[i]}"
-  else:
-    echo "  [skipped — chr22_1kg.vcf.gz.gzi not found]"
+timed("B18", "parseGziBlockStarts: offsets non-empty, sorted, first=0"):
+  let starts = parseGziBlockStarts(GziIdx)
+  doAssert starts.len > 0, "GZI should have at least one entry"
+  doAssert starts[0] == 0, &"first GZI offset should be 0, got {starts[0]}"
+  for i in 1 ..< starts.len:
+    doAssert starts[i] > starts[i - 1],
+      &"GZI offsets not sorted at index {i}: {starts[i-1]} >= {starts[i]}"
 
 # ---------------------------------------------------------------------------
-# V4.2 — parseGziBlockStarts cross-validate: every GZI offset is a valid block
+# B19 — parseGziBlockStarts cross-validate: every GZI offset is a valid block
 # ---------------------------------------------------------------------------
 
-timed("V4.2", "parseGziBlockStarts: every offset is a valid BGZF block start"):
-  if fileExists(Kg22Gzi) and fileExists(Kg22Vcf):
-    let gziStarts = parseGziBlockStarts(Kg22Gzi)
-    let scanStarts = scanBgzfBlockStarts(Kg22Vcf)
-    # Every GZI offset must appear in scanBgzfBlockStarts results.
-    var scanSet: seq[int64] = scanStarts
-    scanSet.sort()
-    for off in gziStarts:
-      let idx = scanSet.binarySearch(off)
-      doAssert idx >= 0,
-        &"GZI offset {off} not found in scanBgzfBlockStarts results"
-  else:
-    echo "  [skipped — chr22_1kg fixtures not found]"
+timed("B19", "parseGziBlockStarts: every offset is a valid BGZF block start"):
+  let gziStarts = parseGziBlockStarts(GziIdx)
+  let scanStarts = scanBgzfBlockStarts(GziVcf)
+  # Every GZI offset must appear in scanBgzfBlockStarts results.
+  var scanSet: seq[int64] = scanStarts
+  scanSet.sort()
+  for off in gziStarts:
+    let idx = scanSet.binarySearch(off)
+    doAssert idx >= 0,
+      &"GZI offset {off} not found in scanBgzfBlockStarts results"
 
 # ===========================================================================
-# V5 — Streaming BGZF compress / decompress
+# B20–B21 — Streaming BGZF compress / decompress
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# V5.1 — bgzfCompressStream/bgzfDecompressStream: round-trip identity
+# B20 — bgzfCompressStream/bgzfDecompressStream: round-trip identity
 # ---------------------------------------------------------------------------
 
-timed("V5.1", "bgzfCompressStream/bgzfDecompressStream: round-trip"):
+timed("B20", "bgzfCompressStream/bgzfDecompressStream: round-trip"):
   let original = decompressBgzfFile(SmallVcf)
   doAssert original.len > 0, "fixture decompressed to empty"
 
@@ -404,10 +398,10 @@ timed("V5.1", "bgzfCompressStream/bgzfDecompressStream: round-trip"):
   removeFile(tmpDecomp)
 
 # ---------------------------------------------------------------------------
-# V5.2 — bgzfCompressStream: empty input produces only EOF block
+# B21 — bgzfCompressStream: empty input produces only EOF block
 # ---------------------------------------------------------------------------
 
-timed("V5.2", "bgzfCompressStream: empty input -> EOF block only"):
+timed("B21", "bgzfCompressStream: empty input -> EOF block only"):
   let tmpIn = getTempDir() / "blocky_test_empty_in.bin"
   let tmpOut = getTempDir() / "blocky_test_empty_out.gz"
   writeFile(tmpIn, "")
@@ -424,7 +418,7 @@ timed("V5.2", "bgzfCompressStream: empty input -> EOF block only"):
   removeFile(tmpOut)
 
 # ===========================================================================
-# V6 — copyRange / copyRangeFromFile: tiered copy with fallback
+# B22–B25 — copyRange / copyRangeFromFile: tiered copy with fallback
 # ===========================================================================
 
 # Helper: write known data, copy a range, verify identity.
@@ -460,37 +454,37 @@ proc testCopyRangeTier(tierName: string) =
   removeFile(tmpDst)
 
 # ---------------------------------------------------------------------------
-# V6.1 — copyRange via copy_file_range (default, both flags clear)
+# B22 — copyRange via copy_file_range (default, both flags clear)
 # ---------------------------------------------------------------------------
 
-timed("V6.1", "copyRange: copy_file_range tier"):
+timed("B22", "copyRange: copy_file_range tier"):
   gTierCopyFileRangeFailed.store(false, moRelaxed)
   gTierSendfileFailed.store(false, moRelaxed)
-  testCopyRangeTier("V6.1 copy_file_range")
+  testCopyRangeTier("B22 copy_file_range")
 
 # ---------------------------------------------------------------------------
-# V6.2 — copyRange via sendfile (copy_file_range disabled)
+# B23 — copyRange via sendfile (copy_file_range disabled)
 # ---------------------------------------------------------------------------
 
-timed("V6.2", "copyRange: sendfile tier"):
+timed("B23", "copyRange: sendfile tier"):
   gTierCopyFileRangeFailed.store(true, moRelaxed)
   gTierSendfileFailed.store(false, moRelaxed)
-  testCopyRangeTier("V6.2 sendfile")
+  testCopyRangeTier("B23 sendfile")
 
 # ---------------------------------------------------------------------------
-# V6.3 — copyRange via pread/pwrite (both tiers disabled)
+# B24 — copyRange via pread/pwrite (both tiers disabled)
 # ---------------------------------------------------------------------------
 
-timed("V6.3", "copyRange: pread/pwrite tier"):
+timed("B24", "copyRange: pread/pwrite tier"):
   gTierCopyFileRangeFailed.store(true, moRelaxed)
   gTierSendfileFailed.store(true, moRelaxed)
-  testCopyRangeTier("V6.3 pread/pwrite")
+  testCopyRangeTier("B24 pread/pwrite")
 
 # ---------------------------------------------------------------------------
-# V6.4 — copyRangeFromFile round-trip
+# B25 — copyRangeFromFile round-trip
 # ---------------------------------------------------------------------------
 
-timed("V6.4", "copyRangeFromFile: round-trip identity"):
+timed("B25", "copyRangeFromFile: round-trip identity"):
   gTierCopyFileRangeFailed.store(false, moRelaxed)
   gTierSendfileFailed.store(false, moRelaxed)
   let tmpSrc = getTempDir() / "blocky_test_crff_src.bin"
@@ -503,11 +497,11 @@ timed("V6.4", "copyRangeFromFile: round-trip identity"):
     discard f.writeBytes(srcData, 0, DataSize)
     f.close()
   let dstFd = posix.open(tmpDst.cstring, O_WRONLY or O_CREAT or O_TRUNC, 0o666.Mode)
-  doAssert dstFd >= 0, "V6.4: could not open dst"
+  doAssert dstFd >= 0, "B25: could not open dst"
   copyRangeFromFile(tmpSrc, dstFd, 0, DataSize)
   discard posix.close(dstFd)
   let got = cast[seq[byte]](readFile(tmpDst))
-  doAssert got == srcData, "V6.4: round-trip mismatch"
+  doAssert got == srcData, "B25: round-trip mismatch"
   removeFile(tmpSrc)
   removeFile(tmpDst)
 
