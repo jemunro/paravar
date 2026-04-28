@@ -666,3 +666,38 @@ timed("C32", "auto-scan unindexed TSV: warning + shards produced"):
   doAssert shards.len >= 1, &"C32: expected at least 1 shard, got {shards.len}"
   removeDir(tmpDir)
 
+# ===========================================================================
+# C33–C34 — stdin piping regressions for compress / decompress
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# C33 — decompress stdin rejects non-BGZF input
+# ---------------------------------------------------------------------------
+
+timed("C33", "decompress stdin: non-BGZF input exits 1"):
+  let (outp, code) = execCmdEx(
+    &"echo 'not bgzf' | {BinPath} decompress 2>&1")
+  doAssert code != 0,
+    &"C33: decompress of non-BGZF stdin should exit non-zero, got {code}"
+  doAssert "not appear" in outp.toLowerAscii or "compressed" in outp.toLowerAscii,
+    &"C33: error should mention compression, got: {outp}"
+
+# ---------------------------------------------------------------------------
+# C34 — compress/decompress stdin with no flags (initOptParser empty-args regression)
+# ---------------------------------------------------------------------------
+
+timed("C34", "compress/decompress stdin no flags: round-trip"):
+  let tmpDir = createTempDir("blocky_", "")
+  let rawPath = tmpDir / "small.vcf"
+  discard execCmdEx(&"bgzip -d -c {SmallVcf} > {rawPath}")
+  let origMd5 = execCmdEx(&"md5sum {rawPath}")[0].split(' ')[0]
+
+  # No -c flag, no file arg — exercises the rawArgs.len == 0 guard.
+  # C22 passes -c so rawArgs = @["-c"] which is non-empty and wouldn't
+  # have caught the initOptParser(@[]) fallback bug.
+  let pipeMd5 = execCmdEx(
+    &"cat {rawPath} | {BinPath} compress | {BinPath} decompress | md5sum")[0].split(' ')[0]
+  doAssert pipeMd5 == origMd5,
+    &"C34: stdin pipe round-trip md5 mismatch: orig={origMd5} got={pipeMd5}"
+  removeDir(tmpDir)
+

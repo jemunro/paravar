@@ -391,23 +391,26 @@ proc decompressUsage(code: int = 1) =
 proc runCompress(rawArgs: seq[string]) =
   var toStdout = false
   var inputFile = ""
-  var p = initOptParser(rawArgs, shortNoVal = ShortNoVal)
-  while true:
-    p.next()
-    case p.kind
-    of cmdEnd: break
-    of cmdShortOption, cmdLongOption:
-      case p.key
-      of "c", "stdout": toStdout = true
-      of "h", "help": compressUsage(0)
-      else:
-        stderr.writeLine "error: unknown option: -" & p.key
-        quit(1)
-    of cmdArgument:
-      if inputFile != "":
-        stderr.writeLine "error: unexpected argument: " & p.key
-        quit(1)
-      inputFile = p.key
+  # Note: initOptParser falls back to commandLineParams() when given an empty
+  # seq, so we must skip parsing entirely when there are no subcommand args.
+  if rawArgs.len > 0:
+    var p = initOptParser(rawArgs, shortNoVal = ShortNoVal)
+    while true:
+      p.next()
+      case p.kind
+      of cmdEnd: break
+      of cmdShortOption, cmdLongOption:
+        case p.key
+        of "c", "stdout": toStdout = true
+        of "h", "help": compressUsage(0)
+        else:
+          stderr.writeLine "error: unknown option: -" & p.key
+          quit(1)
+      of cmdArgument:
+        if inputFile != "":
+          stderr.writeLine "error: unexpected argument: " & p.key
+          quit(1)
+        inputFile = p.key
 
   var inFile: File
   var outFile: File
@@ -452,23 +455,26 @@ proc runCompress(rawArgs: seq[string]) =
 proc runDecompress(rawArgs: seq[string]) =
   var toStdout = false
   var inputFile = ""
-  var p = initOptParser(rawArgs, shortNoVal = ShortNoVal)
-  while true:
-    p.next()
-    case p.kind
-    of cmdEnd: break
-    of cmdShortOption, cmdLongOption:
-      case p.key
-      of "c", "stdout": toStdout = true
-      of "h", "help": decompressUsage(0)
-      else:
-        stderr.writeLine "error: unknown option: -" & p.key
-        quit(1)
-    of cmdArgument:
-      if inputFile != "":
-        stderr.writeLine "error: unexpected argument: " & p.key
-        quit(1)
-      inputFile = p.key
+  # Note: initOptParser falls back to commandLineParams() when given an empty
+  # seq, so we must skip parsing entirely when there are no subcommand args.
+  if rawArgs.len > 0:
+    var p = initOptParser(rawArgs, shortNoVal = ShortNoVal)
+    while true:
+      p.next()
+      case p.kind
+      of cmdEnd: break
+      of cmdShortOption, cmdLongOption:
+        case p.key
+        of "c", "stdout": toStdout = true
+        of "h", "help": decompressUsage(0)
+        else:
+          stderr.writeLine "error: unknown option: -" & p.key
+          quit(1)
+      of cmdArgument:
+        if inputFile != "":
+          stderr.writeLine "error: unexpected argument: " & p.key
+          quit(1)
+        inputFile = p.key
 
   var inFile: File
   var outFile: File
@@ -480,6 +486,17 @@ proc runDecompress(rawArgs: seq[string]) =
       quit(1)
     inFile = stdin
     toStdout = true
+    # Peek first 2 bytes to validate gzip magic (stdin is not seekable,
+    # so push them back with ungetc).
+    var peek: array[2, byte]
+    let n = readBytes(inFile, peek, 0, 2)
+    if n < 2 or peek[0] != 0x1f or peek[1] != 0x8b:
+      stderr.writeLine "error: input does not appear to be gzip/BGZF compressed"
+      quit(1)
+    # Push bytes back in reverse order so they are re-read correctly.
+    proc cungetc(c: cint, f: File): cint {.importc: "ungetc", header: "<stdio.h>".}
+    discard cungetc(cint(peek[1]), inFile)
+    discard cungetc(cint(peek[0]), inFile)
   else:
     if not fileExists(inputFile):
       stderr.writeLine "error: input file not found: " & inputFile
