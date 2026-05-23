@@ -8,11 +8,11 @@ Parallelise processing of bgzipped files by splitting along BGZF block boundarie
 
 ![blocky diagram](docs/blocky_diagram.svg)
 
-A bgzipped file is a sequence of independent BGZF blocks, each containing up to 64 KiB of uncompressed data. Because blocks are self-contained, any block boundary is a valid split point -- the file can be divided into shards without decompressing the data in between.
+A bgzipped file is a sequence of independent BGZF blocks, each containing up to 64 KiB of uncompressed data. Blocks are self-contained at the compression level, but records (VCF rows, BCF records, BED lines, etc.) routinely span multiple blocks — so each shard boundary must land on a record boundary inside one of those blocks, not on the block boundary itself.
 
-When an index is present (TBI, CSI, or GZI), blocky uses it to locate block offsets and divide the file into equal-sized shards. Without an index, blocky scans the BGZF blocks directly — this works for any bgzipped file but is slightly slower as the file must be read sequentially to find split points. BCF files always require a CSI index. With `blocky scatter`, each shard file receives a recompressed header and a recompressed boundary block; all blocks in between are byte-copied directly from disk without decompression. With `blocky run`, the shard data is decompressed and streamed to the worker subprocess via stdin.
+When a TBI or CSI index is present, blocky reads record virtual offsets from it to locate split points directly. With only a GZI (block-start) index, or no index at all, blocky scans the BGZF blocks sequentially and decompresses each candidate boundary block to find a newline — this works for any bgzipped text file but is slightly slower. BCF files always require a CSI index (BCF records have no in-band delimiter to scan for). With `blocky scatter`, each shard file receives a recompressed header and a recompressed boundary block; all blocks in between are byte-copied directly from disk without decompression. With `blocky run`, the shard data is decompressed and streamed to the worker subprocess via stdin.
 
-Only one block per split point is ever decompressed and recompressed. For a file split into N shards, that is N-1 boundary blocks regardless of file size.
+Only one block per split point is ever decompressed and recompressed (to slice it at the record boundary). For a file split into N shards, that is N-1 boundary blocks regardless of file size.
 
 ---
 
@@ -49,6 +49,13 @@ blocky scatter -n 8 -o output_{}.vcf.gz input.vcf.gz
 # Filter in parallel (4 workers, each processing 2 shards sequentially)
 blocky run -n 4 -m 2 -o filtered.vcf.gz input.vcf.gz \
   ::: bcftools view -i "GT='alt'" -Oz
+
+# Multi-stage pipeline: chain tools with extra `:::` separators
+# (each shard runs `bcftools view ... | bcftools norm ... | bcftools annotate ...`)
+blocky run -n 8 -o out.vcf.gz input.vcf.gz \
+  ::: bcftools view -i "GT='alt'" -Ou \
+  ::: bcftools norm -f ref.fa -Ou \
+  ::: bcftools annotate -a annot.vcf.gz -c INFO -Oz
 
 # Tool-managed output: tool writes per-shard files using {} placeholder
 blocky run -n 8 input.vcf.gz \
@@ -98,8 +105,10 @@ blocky scatter -n 4 -o output.bcf input.bcf
 
 Scatter and pipe each shard through a tool pipeline in parallel. Workers pull shards from a shared queue; a concat thread reassembles output in order.
 
+A pipeline can have any number of stages — separate them with `:::` (or `---`). Stages are joined with `|` and executed via `sh -c`, so each shard runs its own copy of the full pipeline:
+
 ```
-blocky run -n <n_workers> [-m <shards_per_worker>] [options] <input> ::: <cmd> [args...]
+blocky run -n <n_workers> [options] <input> ::: <cmd1> [args...] [::: <cmd2> [args...] ...]
 ```
 
 | Flag | Description |
@@ -122,6 +131,12 @@ Total shards = `n * m`. Each worker processes up to `m` shards sequentially. The
 # 4 workers, 2 shards each = 8 total shards
 blocky run -n 4 -m 2 -o filtered.vcf.gz input.vcf.gz \
   ::: bcftools view -i "GT='alt'" -Oz
+
+# Multi-stage pipeline: each `:::` adds another `|`-connected stage
+blocky run -n 8 -o out.vcf.gz input.vcf.gz \
+  ::: bcftools view -i "GT='alt'" -Ou \
+  ::: bcftools norm -f ref.fa -Ou \
+  ::: bcftools annotate -a annot.vcf.gz -c INFO -Oz
 
 # Output to stdout (no -o)
 blocky run -n 4 input.vcf.gz ::: bcftools view -Ov | wc -l
